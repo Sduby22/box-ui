@@ -157,9 +157,16 @@ pub async fn handle_client<R, W>(
             }
             box_ui_ipc::Request::Bind { pid } => {
                 let mut st = state.lock().await;
-                let resp = if st.bound_gui_pid.is_some() {
-                    Response::Error {
-                        message: "Helper is already bound to a GUI process".to_string(),
+                let resp = if let Some(existing) = st.bound_gui_pid {
+                    if existing == pid {
+                        // Same PID re-binding — idempotent, just acknowledge
+                        Response::Ok
+                    } else {
+                        Response::Error {
+                            message: format!(
+                                "Helper is already bound to GUI process PID {existing}"
+                            ),
+                        }
                     }
                 } else {
                     st.bound_gui_pid = Some(pid);
@@ -171,6 +178,17 @@ pub async fn handle_client<R, W>(
                     break;
                 }
             }
+            box_ui_ipc::Request::Upgrade { binary_path } => {
+                let resp = handle_upgrade(&binary_path).await;
+                let should_shutdown = matches!(resp, Response::Ok);
+                if send_response(&mut writer, &resp).await.is_err() {
+                    break;
+                }
+                if should_shutdown {
+                    shutdown.notify_one();
+                    break;
+                }
+            }
             box_ui_ipc::Request::Shutdown => {
                 let _ = send_response(&mut writer, &Response::Ok).await;
                 shutdown.notify_one();
@@ -178,6 +196,35 @@ pub async fn handle_client<R, W>(
             }
         }
     }
+}
+
+async fn handle_upgrade(binary_path: &str) -> Response {
+    let src = Path::new(binary_path);
+    if !src.is_file() {
+        return Response::Error {
+            message: format!("Source binary not found: {binary_path}"),
+        };
+    }
+
+    let dest = Path::new(box_ui_ipc::HELPER_BINARY_PATH);
+
+    if let Err(e) = std::fs::copy(src, dest) {
+        return Response::Error {
+            message: format!("Failed to copy binary: {e}"),
+        };
+    }
+
+    // Ensure correct permissions on the new binary
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o755)) {
+            tracing::warn!("Failed to set permissions on updated binary: {e}");
+        }
+    }
+
+    tracing::info!("Helper binary upgraded from {binary_path}");
+    Response::Ok
 }
 
 async fn handle_start(

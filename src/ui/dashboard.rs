@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use uuid::Uuid;
 
-use crate::app::{push_toast, BoxApp, ToastKind};
+use crate::app::{BoxApp, ToastKind, push_toast};
 use crate::core::download;
 use crate::core::settings::ConfigSource;
 
@@ -14,7 +14,6 @@ const MAX_TRAFFIC_POINTS: usize = 180;
 
 #[derive(Clone)]
 pub struct TrafficPoint {
-    pub time: f64,
     pub upload: f64,
     pub download: f64,
 }
@@ -67,6 +66,10 @@ pub struct DashboardState {
     pub pending_remote_config: Arc<Mutex<Vec<PendingRemoteConfig>>>,
     /// Whether a remote config download is in progress
     pub remote_config_downloading: Arc<AtomicBool>,
+    /// Whether the subscription auto-refresh task is running
+    pub refresh_task_running: Arc<AtomicBool>,
+    /// Config IDs that were refreshed by the background task (need kernel restart if active)
+    pub refreshed_config_ids: Arc<Mutex<Vec<Uuid>>>,
     /// Whether the edit-config window is open
     pub show_edit_config_window: bool,
     /// The config ID being edited
@@ -99,6 +102,8 @@ impl Default for DashboardState {
             add_config_interval_input: "60".to_string(),
             pending_remote_config: Arc::new(Mutex::new(Vec::new())),
             remote_config_downloading: Arc::new(AtomicBool::new(false)),
+            refresh_task_running: Arc::new(AtomicBool::new(false)),
+            refreshed_config_ids: Arc::new(Mutex::new(Vec::new())),
             show_edit_config_window: false,
             edit_config_id: None,
             edit_config_type: AddConfigType::Local,
@@ -129,38 +134,43 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
         let history = app.dashboard_state.traffic_history.lock().unwrap();
         let upload_points: PlotPoints = history
             .iter()
-            .map(|p| [p.time, p.upload])
+            .enumerate()
+            .map(|(i, p)| [i as f64, p.upload])
             .collect();
         let download_points: PlotPoints = history
             .iter()
-            .map(|p| [p.time, p.download])
+            .enumerate()
+            .map(|(i, p)| [i as f64, p.download])
             .collect();
         let history_snapshot: Vec<TrafficPoint> = history.iter().cloned().collect();
         drop(history);
 
-        let upload_line = Line::new("Upload", upload_points)
-            .color(egui::Color32::from_rgb(100, 180, 255));
-        let download_line = Line::new("Download", download_points)
-            .color(egui::Color32::from_rgb(100, 255, 150));
+        let upload_line =
+            Line::new("Upload", upload_points).color(egui::Color32::from_rgb(100, 180, 255));
+        let download_line =
+            Line::new("Download", download_points).color(egui::Color32::from_rgb(100, 255, 150));
 
         Plot::new("traffic_plot")
             .height(200.0)
             .allow_drag(false)
             .allow_zoom(false)
             .allow_scroll(false)
-            .show_axes(true)
+            .show_axes([false, true])
+            .include_x(0.0)
+            .include_x(MAX_TRAFFIC_POINTS as f64)
             .y_axis_formatter(|mark, _range| format_speed_axis(mark.value))
             .label_formatter(move |_name, value| {
                 // Find the closest point by time (x axis)
                 let closest = history_snapshot
                     .iter()
-                    .min_by(|a, b| {
-                        (a.time - value.x)
+                    .enumerate()
+                    .min_by(|(ia, _), (ib, _)| {
+                        ((*ia as f64) - value.x)
                             .abs()
-                            .partial_cmp(&(b.time - value.x).abs())
+                            .partial_cmp(&((*ib as f64) - value.x).abs())
                             .unwrap_or(std::cmp::Ordering::Equal)
                     });
-                if let Some(p) = closest {
+                if let Some((_, p)) = closest {
                     format!(
                         "↑ {}\n↓ {}",
                         crate::core::format_speed(p.upload),
@@ -214,8 +224,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
                         }
                         if ui.small_button("✏").clicked() {
                             app.dashboard_state.edit_config_id = Some(config.id);
-                            app.dashboard_state.edit_config_name_input =
-                                config.name.clone();
+                            app.dashboard_state.edit_config_name_input = config.name.clone();
                             match &config.source {
                                 ConfigSource::Local => {
                                     app.dashboard_state.edit_config_type = AddConfigType::Local;
@@ -254,6 +263,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
                 Some(ConfigAction::SetActive(id)) => {
                     app.settings_manager.set_active_config(id);
                     app.refresh_clash_api_base();
+                    restart_kernel_if_running(app);
                 }
                 Some(ConfigAction::Remove(id)) => app.settings_manager.remove_config(id),
                 None => {}
@@ -267,18 +277,12 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
 
             ui.horizontal(|ui| {
                 ui.label("Version:");
-                let mut kernel_names: Vec<String> = app
-                    .settings_manager
-                    .kernels()
-                    .iter()
-                    .map(|k| k.name.clone())
-                    .collect();
-                kernel_names.sort_by(|a, b| b.cmp(a));
+                let kernel_names = app.settings_manager.kernel_names();
                 let mut selected = app
                     .settings_manager
-                    .active_kernel()
-                    .map(|k| k.name.clone())
-                    .unwrap_or_default();
+                    .active_kernel_name()
+                    .unwrap_or_default()
+                    .to_string();
                 let prev_selected = selected.clone();
                 let available_width = ui.available_width() - 90.0; // reserve space for "+ Download" button
                 egui::ComboBox::from_id_salt("kernel_version")
@@ -295,11 +299,8 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
                     });
                 if selected != prev_selected {
                     app.settings_manager.set_active_kernel(&selected);
-                    let path = app
-                        .settings_manager
-                        .active_kernel_path()
-                        .map(|p| p.to_path_buf());
-                    app.kernel_manager.set_kernel_path(path);
+                    app.kernel_manager
+                        .set_kernel_path(app.settings_manager.active_kernel_path());
                 }
 
                 if ui.small_button("+ Download").clicked() {
@@ -317,18 +318,22 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
                         if let Some(config) = app.settings_manager.active_config() {
                             let path = config.path.clone();
                             let working_dir = app.settings_manager.working_dir();
-                            if let Err(e) = app.kernel_manager.start(
-                                &path,
-                                working_dir,
-                                elevated,
-                            ) {
-                                push_toast(
-                                    &app.toasts,
-                                    ToastKind::Error,
-                                    format!("Start failed: {e}"),
-                                );
-                            } else {
-                                app.refresh_clash_api_base();
+                            match app.kernel_manager.start(&path, working_dir, elevated) {
+                                Ok(()) => {
+                                    push_toast(
+                                        &app.toasts,
+                                        ToastKind::Success,
+                                        "Kernel started".to_string(),
+                                    );
+                                    app.refresh_clash_api_base();
+                                }
+                                Err(e) => {
+                                    push_toast(
+                                        &app.toasts,
+                                        ToastKind::Error,
+                                        format!("Start failed: {e}"),
+                                    );
+                                }
                             }
                         } else {
                             push_toast(
@@ -338,28 +343,45 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
                             );
                         }
                     }
-                } else if ui.button("⏹ Stop").clicked()
-                    && let Err(e) = app.kernel_manager.stop()
-                {
-                    push_toast(&app.toasts, ToastKind::Error, format!("Stop failed: {e}"));
+                } else if ui.button("⏹ Stop").clicked() {
+                    match app.kernel_manager.stop() {
+                        Ok(()) => {
+                            push_toast(
+                                &app.toasts,
+                                ToastKind::Success,
+                                "Kernel stopped".to_string(),
+                            );
+                        }
+                        Err(e) => {
+                            push_toast(
+                                &app.toasts,
+                                ToastKind::Error,
+                                format!("Stop failed: {e}"),
+                            );
+                        }
+                    }
                 }
 
                 if ui.button("🔄 Restart").clicked() {
                     if let Some(config) = app.settings_manager.active_config() {
                         let path = config.path.clone();
                         let working_dir = app.settings_manager.working_dir();
-                        if let Err(e) = app.kernel_manager.restart(
-                            &path,
-                            working_dir,
-                            elevated,
-                        ) {
-                            push_toast(
-                                &app.toasts,
-                                ToastKind::Error,
-                                format!("Restart failed: {e}"),
-                            );
-                        } else {
-                            app.refresh_clash_api_base();
+                        match app.kernel_manager.restart(&path, working_dir, elevated) {
+                            Ok(()) => {
+                                push_toast(
+                                    &app.toasts,
+                                    ToastKind::Success,
+                                    "Kernel restarted".to_string(),
+                                );
+                                app.refresh_clash_api_base();
+                            }
+                            Err(e) => {
+                                push_toast(
+                                    &app.toasts,
+                                    ToastKind::Error,
+                                    format!("Restart failed: {e}"),
+                                );
+                            }
                         }
                     } else {
                         push_toast(
@@ -413,9 +435,19 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
     });
 
     // Persist and activate kernel if async install completed
-    if let Some(install) = app.dashboard_state.pending_kernel_install.lock().unwrap().take() {
-        app.settings_manager
-            .add_kernel_remote(install.tag, install.path.clone());
+    if let Some(install) = app
+        .dashboard_state
+        .pending_kernel_install
+        .lock()
+        .unwrap()
+        .take()
+    {
+        let name = install
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or(install.tag);
+        app.settings_manager.activate_new_kernel(&name);
         app.kernel_manager.set_kernel_path(Some(install.path));
     }
 
@@ -437,18 +469,50 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
     }
     drop(pending_configs);
 
+    // Handle configs refreshed by the background auto-refresh task
+    let refreshed: Vec<Uuid> = app
+        .dashboard_state
+        .refreshed_config_ids
+        .lock()
+        .unwrap()
+        .drain(..)
+        .collect();
+    if !refreshed.is_empty() {
+        let active_id = app.settings_manager.active_config_id();
+        let active_refreshed = refreshed.iter().any(|id| Some(*id) == active_id);
+        for id in &refreshed {
+            if let Some(config) = app.settings_manager.configs().iter().find(|c| c.id == *id) {
+                push_toast(
+                    &app.toasts,
+                    ToastKind::Success,
+                    format!("Config \"{}\" refreshed", config.name),
+                );
+            }
+        }
+        if active_refreshed {
+            app.refresh_clash_api_base();
+            restart_kernel_if_running(app);
+        }
+    }
+
+    // Start subscription auto-refresh task if not already running
+    if !app.dashboard_state.refresh_task_running.load(Ordering::Relaxed) {
+        start_config_refresh_task(app);
+    }
+
     // Modal windows
     show_releases_window(ui.ctx(), app);
     show_add_config_window(ui.ctx(), app);
     show_edit_config_window(ui.ctx(), app);
 
     // Sync polling state from async task
-    app.dashboard_state.traffic_polling =
-        app.dashboard_state.polling_flag.load(Ordering::Relaxed);
+    app.dashboard_state.traffic_polling = app.dashboard_state.polling_flag.load(Ordering::Relaxed);
 
     // Start traffic polling if core is running, window visible, and not already polling
     if app.cached_is_running
-        && app.window_visible.load(std::sync::atomic::Ordering::Relaxed)
+        && app
+            .window_visible
+            .load(std::sync::atomic::Ordering::Relaxed)
         && !app.dashboard_state.traffic_polling
     {
         start_traffic_polling(app);
@@ -466,15 +530,13 @@ fn show_releases_window(ctx: &egui::Context, app: &mut BoxApp) {
         return;
     }
 
-    let progress_val = app.dashboard_state.download_progress.load(Ordering::Relaxed);
+    let progress_val = app
+        .dashboard_state
+        .download_progress
+        .load(Ordering::Relaxed);
     let is_downloading = progress_val > 0;
 
-    let installed_versions: Vec<String> = app
-        .settings_manager
-        .installed_kernel_versions()
-        .into_iter()
-        .map(|s| s.to_string())
-        .collect();
+    let installed_versions = app.settings_manager.installed_kernel_versions();
 
     egui::Window::new("Download Kernel")
         .open(&mut open)
@@ -533,24 +595,36 @@ fn show_releases_window(ctx: &egui::Context, app: &mut BoxApp) {
                 }
             }
 
-            egui::ScrollArea::vertical().max_width(f32::INFINITY).show(ui, |ui| {
-                for (tag, url, asset_name) in &release_items {
-                    ui.horizontal(|ui| {
-                        ui.label(tag);
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let is_installed = installed_versions.iter().any(|v| v == tag);
-                            if is_installed {
-                                ui.add_enabled(false, egui::Button::new("Installed"));
-                            } else if ui
-                                .add_enabled(!is_downloading, egui::Button::new("Install"))
-                                .clicked()
-                            {
-                                download_and_install_kernel(app, url, tag, asset_name);
-                            }
+            egui::ScrollArea::vertical()
+                .max_width(f32::INFINITY)
+                .show(ui, |ui| {
+                    let mut delete_tag: Option<String> = None;
+                    for (tag, url, asset_name) in &release_items {
+                        ui.horizontal(|ui| {
+                            ui.label(tag);
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let is_installed = installed_versions.iter().any(|v| v == tag);
+                                    if is_installed {
+                                        ui.add_enabled(false, egui::Button::new("Installed"));
+                                        if ui.small_button("🗑").clicked() {
+                                            delete_tag = Some(tag.clone());
+                                        }
+                                    } else if ui
+                                        .add_enabled(!is_downloading, egui::Button::new("Install"))
+                                        .clicked()
+                                    {
+                                        download_and_install_kernel(app, url, tag, asset_name);
+                                    }
+                                },
+                            );
                         });
-                    });
-                }
-            });
+                    }
+                    if let Some(tag) = delete_tag {
+                        delete_kernel(app, &tag);
+                    }
+                });
         });
 
     app.dashboard_state.show_releases_window = open;
@@ -652,9 +726,7 @@ fn show_add_config_window(ctx: &egui::Context, app: &mut BoxApp) {
 
                     ui.horizontal(|ui| {
                         ui.label("Update Interval (min):");
-                        ui.text_edit_singleline(
-                            &mut app.dashboard_state.add_config_interval_input,
-                        );
+                        ui.text_edit_singleline(&mut app.dashboard_state.add_config_interval_input);
                     });
 
                     ui.add_space(8.0);
@@ -710,18 +782,14 @@ fn show_add_config_window(ctx: &egui::Context, app: &mut BoxApp) {
                                         push_toast(
                                             &toasts,
                                             ToastKind::Success,
-                                            format!(
-                                                "Remote config \"{config_name}\" downloaded"
-                                            ),
+                                            format!("Remote config \"{config_name}\" downloaded"),
                                         );
                                     }
                                     Err(e) => {
                                         push_toast(
                                             &toasts,
                                             ToastKind::Error,
-                                            format!(
-                                                "Failed to fetch \"{config_name}\": {e}"
-                                            ),
+                                            format!("Failed to fetch \"{config_name}\": {e}"),
                                         );
                                     }
                                 }
@@ -778,16 +846,27 @@ fn show_edit_config_window(ctx: &egui::Context, app: &mut BoxApp) {
 
                 ui.horizontal(|ui| {
                     ui.label("Update Interval (min):");
-                    ui.text_edit_singleline(
-                        &mut app.dashboard_state.edit_config_interval_input,
-                    );
+                    ui.text_edit_singleline(&mut app.dashboard_state.edit_config_interval_input);
                 });
             }
 
             ui.add_space(8.0);
 
-            if ui.button("Save").clicked() {
-                let name = app.dashboard_state.edit_config_name_input.trim().to_string();
+            let is_downloading = is_remote
+                && app
+                    .dashboard_state
+                    .remote_config_downloading
+                    .load(Ordering::Relaxed);
+
+            if ui
+                .add_enabled(!is_downloading, egui::Button::new("Save"))
+                .clicked()
+            {
+                let name = app
+                    .dashboard_state
+                    .edit_config_name_input
+                    .trim()
+                    .to_string();
                 if name.is_empty() {
                     push_toast(
                         &app.toasts,
@@ -795,15 +874,11 @@ fn show_edit_config_window(ctx: &egui::Context, app: &mut BoxApp) {
                         "Name cannot be empty".to_string(),
                     );
                 } else if let Some(id) = app.dashboard_state.edit_config_id {
-                    let source = if is_remote {
+                    if is_remote {
                         let url = app.dashboard_state.edit_config_url_input.trim().to_string();
-                        let interval_str =
-                            app.dashboard_state.edit_config_interval_input.trim();
-                        match interval_str.parse::<u32>() {
-                            Ok(interval) => ConfigSource::Remote {
-                                url,
-                                refresh_interval_minutes: interval,
-                            },
+                        let interval_str = app.dashboard_state.edit_config_interval_input.trim();
+                        let interval = match interval_str.parse::<u32>() {
+                            Ok(v) => v,
                             Err(_) => {
                                 push_toast(
                                     &app.toasts,
@@ -812,22 +887,84 @@ fn show_edit_config_window(ctx: &egui::Context, app: &mut BoxApp) {
                                 );
                                 return;
                             }
+                        };
+                        if url.is_empty() {
+                            push_toast(
+                                &app.toasts,
+                                ToastKind::Error,
+                                "URL cannot be empty".to_string(),
+                            );
+                            return;
                         }
+                        // Re-fetch remote config on save; close window only on success
+                        let dest = app.settings_manager.config_path(&name);
+                        let client = app.http_client.clone();
+                        let toasts = app.toasts.clone();
+                        let downloading_flag =
+                            app.dashboard_state.remote_config_downloading.clone();
+                        let refreshed_ids = app.dashboard_state.refreshed_config_ids.clone();
+                        let config_url = url.clone();
+                        let config_name = name.clone();
+
+                        let source = ConfigSource::Remote {
+                            url,
+                            refresh_interval_minutes: interval,
+                        };
+                        app.settings_manager.update_config(id, name, source);
+
+                        downloading_flag.store(true, Ordering::Relaxed);
+                        app.runtime.spawn(async move {
+                            match download::fetch_remote_config(&client, &config_url, &dest).await {
+                                Ok(()) => {
+                                    // Toast handled by refreshed_ids drain in show()
+                                    refreshed_ids.lock().unwrap().push(id);
+                                }
+                                Err(e) => {
+                                    push_toast(
+                                        &toasts,
+                                        ToastKind::Error,
+                                        format!("Failed to fetch \"{config_name}\": {e}"),
+                                    );
+                                }
+                            }
+                            downloading_flag.store(false, Ordering::Relaxed);
+                        });
+                        // Close window immediately — metadata is saved, download is async
+                        app.dashboard_state.show_edit_config_window = false;
                     } else {
-                        ConfigSource::Local
-                    };
-                    app.settings_manager.update_config(id, name.clone(), source);
-                    push_toast(
-                        &app.toasts,
-                        ToastKind::Success,
-                        format!("Config \"{name}\" updated"),
-                    );
-                    app.dashboard_state.show_edit_config_window = false;
+                        // Local config: verify file still exists on disk
+                        let config_path = app
+                            .settings_manager
+                            .configs()
+                            .iter()
+                            .find(|c| c.id == id)
+                            .map(|c| c.path.clone());
+                        if let Some(path) = config_path
+                            && !path.is_file()
+                        {
+                            push_toast(
+                                &app.toasts,
+                                ToastKind::Error,
+                                format!("Config file not found: {}", path.display()),
+                            );
+                        } else {
+                            app.settings_manager
+                                .update_config(id, name.clone(), ConfigSource::Local);
+                            push_toast(
+                                &app.toasts,
+                                ToastKind::Success,
+                                format!("Config \"{name}\" updated"),
+                            );
+                            app.dashboard_state.show_edit_config_window = false;
+                        }
+                    }
                 }
             }
         });
 
-    app.dashboard_state.show_edit_config_window = open;
+    // Respect both X button (open=false) and Save button (set inside closure)
+    app.dashboard_state.show_edit_config_window =
+        open && app.dashboard_state.show_edit_config_window;
 }
 
 fn fetch_releases(app: &mut BoxApp) {
@@ -841,7 +978,11 @@ fn fetch_releases(app: &mut BoxApp) {
                 *releases.lock().unwrap() = list;
             }
             Err(e) => {
-                push_toast(&toasts, ToastKind::Error, format!("Fetch releases failed: {e}"));
+                push_toast(
+                    &toasts,
+                    ToastKind::Error,
+                    format!("Fetch releases failed: {e}"),
+                );
             }
         }
     });
@@ -864,28 +1005,22 @@ fn download_and_install_kernel(app: &mut BoxApp, url: &str, tag: &str, asset_nam
         let dest = kernels_dir.join(&asset_name);
 
         match download::download_asset_with_progress(&client, &url, &dest, &progress).await {
-            Ok(()) => {
-                match download::extract_kernel(&dest, &kernels_dir, &tag) {
-                    Ok(kernel_path) => {
-                        *pending_install.lock().unwrap() = Some(PendingKernelInstall {
-                            tag: tag.clone(),
-                            path: kernel_path,
-                        });
-                        push_toast(
-                            &toasts,
-                            ToastKind::Success,
-                            format!("Kernel {tag} installed"),
-                        );
-                    }
-                    Err(e) => {
-                        push_toast(
-                            &toasts,
-                            ToastKind::Error,
-                            format!("Extraction failed: {e}"),
-                        );
-                    }
+            Ok(()) => match download::extract_kernel(&dest, &kernels_dir, &tag) {
+                Ok(kernel_path) => {
+                    *pending_install.lock().unwrap() = Some(PendingKernelInstall {
+                        tag: tag.clone(),
+                        path: kernel_path,
+                    });
+                    push_toast(
+                        &toasts,
+                        ToastKind::Success,
+                        format!("Kernel {tag} installed"),
+                    );
                 }
-            }
+                Err(e) => {
+                    push_toast(&toasts, ToastKind::Error, format!("Extraction failed: {e}"));
+                }
+            },
             Err(e) => {
                 push_toast(
                     &toasts,
@@ -900,6 +1035,28 @@ fn download_and_install_kernel(app: &mut BoxApp, url: &str, tag: &str, asset_nam
     });
 }
 
+fn delete_kernel(app: &mut BoxApp, tag: &str) {
+    // tag is also the filename in kernels_dir
+    let is_active = app.settings_manager.active_kernel_name() == Some(tag);
+    if is_active && app.cached_is_running {
+        push_toast(
+            &app.toasts,
+            ToastKind::Error,
+            "Cannot delete the running kernel".to_string(),
+        );
+        return;
+    }
+    app.settings_manager.remove_kernel(tag);
+    if is_active {
+        app.kernel_manager.set_kernel_path(None);
+    }
+    push_toast(
+        &app.toasts,
+        ToastKind::Success,
+        format!("Kernel {tag} deleted"),
+    );
+}
+
 fn start_traffic_polling(app: &mut BoxApp) {
     app.dashboard_state.traffic_polling = true;
     let history = app.dashboard_state.traffic_history.clone();
@@ -908,12 +1065,10 @@ fn start_traffic_polling(app: &mut BoxApp) {
     let secret = app.clash_api_secret.clone();
 
     polling_flag.store(true, Ordering::Relaxed);
+    history.lock().unwrap().clear();
 
     app.runtime.spawn(async move {
-        let mut ws_url = format!(
-            "{}/traffic",
-            base_url.replacen("http", "ws", 1)
-        );
+        let mut ws_url = format!("{}/traffic", base_url.replacen("http", "ws", 1));
         if !secret.is_empty() {
             ws_url.push_str(&format!("?token={secret}"));
         }
@@ -929,7 +1084,6 @@ fn start_traffic_polling(app: &mut BoxApp) {
 
         use futures_util::StreamExt;
         let (_, mut read) = ws_stream.split();
-        let mut counter = 0.0f64;
 
         while polling_flag.load(Ordering::Relaxed) {
             match read.next().await {
@@ -941,9 +1095,7 @@ fn start_traffic_polling(app: &mut BoxApp) {
                         if h.len() >= MAX_TRAFFIC_POINTS {
                             h.pop_front();
                         }
-                        counter += 1.0;
                         h.push_back(TrafficPoint {
-                            time: counter,
                             upload: up,
                             download: down,
                         });
@@ -959,6 +1111,108 @@ fn start_traffic_polling(app: &mut BoxApp) {
         }
 
         polling_flag.store(false, Ordering::Relaxed);
+    });
+}
+
+/// Restart the kernel if it's currently running (e.g. after config switch or refresh).
+fn restart_kernel_if_running(app: &mut BoxApp) {
+    if !app.cached_is_running {
+        return;
+    }
+    if let Some(config) = app.settings_manager.active_config() {
+        let path = config.path.clone();
+        let working_dir = app.settings_manager.working_dir();
+        let elevated = app.settings_manager.run_elevated();
+        match app.kernel_manager.restart(&path, working_dir, elevated) {
+            Ok(()) => {
+                push_toast(
+                    &app.toasts,
+                    ToastKind::Success,
+                    "Kernel restarted".to_string(),
+                );
+                app.refresh_clash_api_base();
+            }
+            Err(e) => {
+                push_toast(
+                    &app.toasts,
+                    ToastKind::Error,
+                    format!("Restart failed: {e}"),
+                );
+            }
+        }
+    }
+}
+
+/// Spawn a background task that checks remote configs and refreshes any that are due.
+/// Runs one pass then exits so it picks up fresh config state on next invocation.
+fn start_config_refresh_task(app: &mut BoxApp) {
+    // Collect remote config info needed by the task
+    let remote_configs: Vec<(Uuid, String, std::path::PathBuf, u32)> = app
+        .settings_manager
+        .configs()
+        .iter()
+        .filter_map(|c| match &c.source {
+            ConfigSource::Remote {
+                url,
+                refresh_interval_minutes,
+            } => Some((c.id, url.clone(), c.path.clone(), *refresh_interval_minutes)),
+            _ => None,
+        })
+        .collect();
+
+    if remote_configs.is_empty() {
+        return;
+    }
+
+    let running_flag = app.dashboard_state.refresh_task_running.clone();
+    let refreshed_ids = app.dashboard_state.refreshed_config_ids.clone();
+    let client = app.http_client.clone();
+    let toasts = app.toasts.clone();
+
+    running_flag.store(true, Ordering::Relaxed);
+
+    app.runtime.spawn(async move {
+        // Wait 60 seconds before checking (avoid hammering on startup)
+        tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+
+        for &(id, ref url, ref path, interval_minutes) in &remote_configs {
+            if interval_minutes == 0 {
+                continue;
+            }
+
+            // Check file age — refresh if older than the interval
+            let needs_refresh = match std::fs::metadata(path).and_then(|m| m.modified()) {
+                Ok(modified) => {
+                    let elapsed = SystemTime::now()
+                        .duration_since(modified)
+                        .unwrap_or_default();
+                    elapsed.as_secs() >= u64::from(interval_minutes) * 60
+                }
+                Err(_) => true, // file missing, re-download
+            };
+
+            if !needs_refresh {
+                continue;
+            }
+
+            match download::fetch_remote_config(&client, url, path).await {
+                Ok(()) => {
+                    tracing::info!("Auto-refreshed config from {url}");
+                    refreshed_ids.lock().unwrap().push(id);
+                }
+                Err(e) => {
+                    tracing::warn!("Auto-refresh failed for {url}: {e}");
+                    push_toast(
+                        &toasts,
+                        ToastKind::Error,
+                        format!("Auto-refresh failed: {e}"),
+                    );
+                }
+            }
+        }
+
+        // Mark task as done so it restarts with fresh config state
+        running_flag.store(false, Ordering::Relaxed);
     });
 }
 

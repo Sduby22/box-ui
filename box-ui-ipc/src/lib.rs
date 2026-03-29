@@ -49,6 +49,9 @@ pub enum Request {
     Version,
     /// Bind the helper to a GUI process. Helper will exit when this PID dies.
     Bind { pid: u32 },
+    /// Self-upgrade: copy the new binary from `binary_path` over the installed helper,
+    /// then shutdown so the GUI can kickstart the updated version.
+    Upgrade { binary_path: String },
     Shutdown,
 }
 

@@ -87,6 +87,10 @@ pub struct ConnectionsState {
     prev_bytes: HashMap<String, (u64, u64, Instant)>,
     /// Computed speeds: id -> (upload_speed, download_speed) in bytes/sec.
     speeds: HashMap<String, (f64, f64)>,
+    /// Snapshot of the last connections data used for speed calculation,
+    /// so we only recalculate when the WebSocket delivers new data.
+    last_snapshot_len: usize,
+    last_snapshot_bytes: u64,
 }
 
 impl Default for ConnectionsState {
@@ -99,13 +103,28 @@ impl Default for ConnectionsState {
             sort_order: SortOrder::Ascending,
             prev_bytes: HashMap::new(),
             speeds: HashMap::new(),
+            last_snapshot_len: 0,
+            last_snapshot_bytes: 0,
         }
     }
 }
 
 impl ConnectionsState {
     /// Update speed calculations from current connections snapshot.
+    /// Only recalculates when the underlying data has actually changed
+    /// (new WebSocket message), not on every UI repaint.
     fn update_speeds(&mut self, connections: &[Connection]) {
+        // Quick fingerprint: number of connections + total bytes
+        let total_bytes: u64 = connections
+            .iter()
+            .map(|c| c.upload + c.download)
+            .sum();
+        if connections.len() == self.last_snapshot_len && total_bytes == self.last_snapshot_bytes {
+            return; // Data unchanged since last update, keep existing speeds
+        }
+        self.last_snapshot_len = connections.len();
+        self.last_snapshot_bytes = total_bytes;
+
         let now = Instant::now();
         let mut new_prev = HashMap::with_capacity(connections.len());
 

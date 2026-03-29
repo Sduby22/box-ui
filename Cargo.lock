@@ -537,10 +537,9 @@ dependencies = [
 
 [[package]]
 name = "box-ui"
-version = "0.1.0"
+version = "0.3.1"
 dependencies = [
  "box-ui-ipc",
- "chrono",
  "dirs",
  "eframe",
  "egui",
@@ -553,7 +552,6 @@ dependencies = [
  "open",
  "reqwest",
  "rfd",
- "ringbuffer",
  "serde",
  "serde_json",
  "tar",
@@ -570,11 +568,10 @@ dependencies = [
 
 [[package]]
 name = "box-ui-helper"
-version = "0.1.0"
+version = "0.3.1"
 dependencies = [
  "box-ui-ipc",
  "libc",
- "serde",
  "serde_json",
  "tokio",
  "tracing",
@@ -583,7 +580,7 @@ dependencies = [
 
 [[package]]
 name = "box-ui-ipc"
-version = "0.1.0"
+version = "0.3.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -759,19 +756,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ced0551234e87afee12411d535648dd89d2e7f34c78b753395567aff3d447ff"
 dependencies = [
  "libc",
-]
-
-[[package]]
-name = "chrono"
-version = "0.4.44"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c673075a2e0e5f4a1dde27ce9dee1ea4558c7ffe648f576438a20ca1d2acc4b0"
-dependencies = [
- "iana-time-zone",
- "js-sys",
- "num-traits",
- "wasm-bindgen",
- "windows-link",
 ]
 
 [[package]]
@@ -2173,30 +2157,6 @@ dependencies = [
  "tower-service",
  "tracing",
  "windows-registry",
-]
-
-[[package]]
-name = "iana-time-zone"
-version = "0.1.65"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e31bc9ad994ba00e440a8aa5c9ef0ec67d5cb5e5cb0cc7f8b744a35b389cc470"
-dependencies = [
- "android_system_properties",
- "core-foundation-sys",
- "iana-time-zone-haiku",
- "js-sys",
- "log",
- "wasm-bindgen",
- "windows-core",
-]
-
-[[package]]
-name = "iana-time-zone-haiku"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f31827a206f56af32e590ba56d5d2d085f558508192593743f16b2306495269f"
-dependencies = [
- "cc",
 ]
 
 [[package]]
@@ -3982,12 +3942,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ringbuffer"
-version = "0.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57b0b88a509053cbfd535726dcaaceee631313cef981266119527a1d110f6d2b"
-
-[[package]]
 name = "rustc-hash"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4733,7 +4687,6 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
- "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",

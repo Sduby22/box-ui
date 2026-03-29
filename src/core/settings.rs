@@ -20,25 +20,12 @@ pub enum ConfigSource {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KernelEntry {
-    pub name: String,
-    pub path: PathBuf,
-    pub source: KernelSource,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum KernelSource {
-    Local,
-    Remote { version: String },
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AppSettings {
     pub configs: Vec<ConfigEntry>,
     /// UUID of the active configuration.
     pub active_config: Option<Uuid>,
-    pub kernels: Vec<KernelEntry>,
+    /// Filename of the active kernel binary in the kernels directory.
     pub active_kernel: Option<String>,
     /// Maximum number of log lines to keep in the buffer.
     #[serde(default = "default_max_log_lines")]
@@ -60,7 +47,6 @@ impl Default for AppSettings {
         Self {
             configs: Vec::new(),
             active_config: None,
-            kernels: Vec::new(),
             active_kernel: None,
             max_log_lines: default_max_log_lines(),
             run_elevated: false,
@@ -265,48 +251,64 @@ impl SettingsManager {
 
     // ── Kernel operations ──
 
-    pub fn add_kernel_remote(&mut self, tag: String, path: PathBuf) {
-        if self.settings.active_kernel.is_none() {
-            self.settings.active_kernel = Some(tag.clone());
-        }
-        self.settings.kernels.push(KernelEntry {
-            name: tag.clone(),
-            path,
-            source: KernelSource::Remote { version: tag },
-        });
-        self.save();
+    /// List all kernel binaries in the kernels directory.
+    /// Returns filenames sorted reverse-alphabetically (newest version first).
+    pub fn kernel_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(&self.kernels_dir)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| {
+                let e = e.ok()?;
+                let ft = e.file_type().ok()?;
+                if ft.is_file() {
+                    Some(e.file_name().to_string_lossy().to_string())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        names.sort_by(|a, b| b.cmp(a));
+        names
     }
 
     pub fn set_active_kernel(&mut self, name: &str) {
-        if self.settings.kernels.iter().any(|k| k.name == name) {
-            self.settings.active_kernel = Some(name.to_string());
+        self.settings.active_kernel = Some(name.to_string());
+        self.save();
+    }
+
+    pub fn active_kernel_name(&self) -> Option<&str> {
+        self.settings.active_kernel.as_deref()
+    }
+
+    pub fn active_kernel_path(&self) -> Option<PathBuf> {
+        let name = self.settings.active_kernel.as_deref()?;
+        let path = self.kernels_dir.join(name);
+        if path.is_file() { Some(path) } else { None }
+    }
+
+    /// Return the set of installed kernel filenames (for the releases window).
+    /// Filenames are version tags (e.g. "v1.11.0"), matching GitHub release tag_name.
+    pub fn installed_kernel_versions(&self) -> Vec<String> {
+        self.kernel_names()
+    }
+
+    /// Remove a kernel binary from the kernels directory.
+    /// If it was the active kernel, clear the active selection.
+    pub fn remove_kernel(&mut self, name: &str) {
+        let path = self.kernels_dir.join(name);
+        std::fs::remove_file(&path).ok();
+        if self.settings.active_kernel.as_deref() == Some(name) {
+            self.settings.active_kernel = None;
             self.save();
         }
     }
 
-    pub fn active_kernel(&self) -> Option<&KernelEntry> {
-        let active_name = self.settings.active_kernel.as_deref()?;
-        self.settings.kernels.iter().find(|k| k.name == active_name)
-    }
-
-    pub fn active_kernel_path(&self) -> Option<&Path> {
-        self.active_kernel().map(|k| k.path.as_path())
-    }
-
-    pub fn kernels(&self) -> &[KernelEntry] {
-        &self.settings.kernels
-    }
-
-    /// Return the set of installed remote kernel versions (tag names).
-    pub fn installed_kernel_versions(&self) -> Vec<&str> {
-        self.settings
-            .kernels
-            .iter()
-            .filter_map(|k| match &k.source {
-                KernelSource::Remote { version } => Some(version.as_str()),
-                KernelSource::Local => None,
-            })
-            .collect()
+    /// Activate a newly downloaded kernel by filename.
+    pub fn activate_new_kernel(&mut self, name: &str) {
+        if self.settings.active_kernel.is_none() {
+            self.settings.active_kernel = Some(name.to_string());
+            self.save();
+        }
     }
 
     pub fn kernels_dir(&self) -> &Path {

@@ -5,44 +5,6 @@
 //! will use Windows Service Manager. Installation requires one-time administrator
 //! authorization via a native OS dialog.
 
-/// Check if the installed helper is outdated and needs updating.
-/// Compares the running helper's version against the GUI's version.
-/// Returns false if the helper is actively managing a running kernel to avoid disruption.
-pub fn needs_update() -> bool {
-    if !is_installed() {
-        return false;
-    }
-    let gui_version = env!("CARGO_PKG_VERSION");
-    match super::helper_client::HelperClient::connect() {
-        Ok(mut client) => {
-            let version_outdated = match client.version() {
-                Ok(helper_version) => helper_version != gui_version,
-                Err(_) => true,
-            };
-            if !version_outdated {
-                return false;
-            }
-            // Don't update if the helper is actively managing a running kernel
-            if let Ok((true, _)) = client.status() {
-                tracing::info!(
-                    "Helper is outdated but managing a running kernel, deferring update"
-                );
-                return false;
-            }
-            true
-        }
-        Err(_) => false,
-    }
-}
-
-/// Update the helper daemon: shutdown the old one, reinstall, kickstart the new one.
-pub fn update_helper() -> Result<(), String> {
-    if let Ok(mut client) = super::helper_client::HelperClient::connect() {
-        client.shutdown().ok();
-        std::thread::sleep(std::time::Duration::from_millis(500));
-    }
-    install_helper()
-}
 
 #[cfg(target_os = "macos")]
 mod imp {

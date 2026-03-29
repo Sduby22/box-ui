@@ -29,7 +29,8 @@ pub struct OutboundsState {
     pub loading: Arc<AtomicBool>,
     pub last_error: Option<String>,
     pub last_fetch: Option<Instant>,
-    pub collapsed: HashSet<String>,
+    /// Groups that are expanded (default is collapsed).
+    pub expanded: HashSet<String>,
 }
 
 impl Default for OutboundsState {
@@ -39,7 +40,7 @@ impl Default for OutboundsState {
             loading: Arc::new(AtomicBool::new(false)),
             last_error: None,
             last_fetch: None,
-            collapsed: HashSet::new(),
+            expanded: HashSet::new(),
         }
     }
 }
@@ -83,12 +84,12 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
 
     ui.horizontal(|ui| {
         if ui.button("Collapse All").clicked() {
-            for name in &all_group_names {
-                app.outbounds_state.collapsed.insert(name.clone());
-            }
+            app.outbounds_state.expanded.clear();
         }
         if ui.button("Expand All").clicked() {
-            app.outbounds_state.collapsed.clear();
+            for name in &all_group_names {
+                app.outbounds_state.expanded.insert(name.clone());
+            }
         }
     });
     ui.add_space(4.0);
@@ -103,10 +104,12 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
                 _ => continue,
             };
 
-            let is_collapsed = app.outbounds_state.collapsed.contains(&group.name);
+            let is_collapsed = !app.outbounds_state.expanded.contains(&group.name);
 
             ui.group(|ui| {
                 let header = ui.horizontal(|ui| {
+                    let arrow = if is_collapsed { "▶" } else { "▼" };
+                    ui.label(arrow);
                     ui.strong(&group.name);
                     ui.label(format!("({})", group.group_type));
                     if let Some(current) = &group.now {
@@ -115,11 +118,14 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
                         });
                     }
                 });
-                if header.response.interact(egui::Sense::click()).clicked() {
+                // Make the entire header row clickable (including text)
+                let header_rect = header.response.rect;
+                let header_id = ui.id().with(&group.name).with("header");
+                if ui.interact(header_rect, header_id, egui::Sense::click()).clicked() {
                     if is_collapsed {
-                        app.outbounds_state.collapsed.remove(&group.name);
+                        app.outbounds_state.expanded.insert(group.name.clone());
                     } else {
-                        app.outbounds_state.collapsed.insert(group.name.clone());
+                        app.outbounds_state.expanded.remove(&group.name);
                     }
                 }
 

@@ -29,12 +29,73 @@ impl HelperClient {
         }
     }
 
-    /// Ensure the helper is running. If not, try to kickstart it via the OS service manager.
-    pub fn ensure_running() -> Result<(), String> {
-        if Self::is_available() {
-            return Ok(());
+    /// Ensure the helper is running, up-to-date, and bound to this GUI process.
+    /// If outdated, asks the running helper to self-upgrade (no password needed).
+    /// If not running, kickstarts it via the OS service manager.
+    /// Returns the helper version string on success.
+    pub fn ensure_running() -> Result<String, String> {
+        if !Self::is_available() {
+            Self::kickstart_and_wait()?;
         }
 
+        // Check version and self-upgrade if needed
+        let gui_version = env!("CARGO_PKG_VERSION");
+        let mut client = Self::connect()?;
+        let needs_upgrade = match client.version() {
+            Ok(v) => v != gui_version,
+            Err(_) => true,
+        };
+
+        if needs_upgrade {
+            // Don't upgrade if helper is actively managing a running kernel
+            if let Ok((true, _)) = client.status() {
+                tracing::info!(
+                    "Helper is outdated but managing a running kernel, deferring upgrade"
+                );
+            } else {
+                // Find the new helper binary next to the GUI executable
+                let helper_src = std::env::current_exe()
+                    .map_err(|e| format!("Cannot determine executable path: {e}"))?
+                    .parent()
+                    .ok_or("Cannot determine executable directory")?
+                    .join("box-ui-helper");
+
+                if helper_src.exists() {
+                    tracing::info!("Upgrading helper daemon via IPC");
+                    // Try IPC self-upgrade first; fall back to osascript reinstall
+                    // (needed for old helpers that don't support the Upgrade command)
+                    match client.upgrade(&helper_src) {
+                        Ok(()) => {
+                            drop(client);
+                            std::thread::sleep(Duration::from_millis(500));
+                        }
+                        Err(e) => {
+                            tracing::warn!("IPC upgrade failed ({e}), falling back to reinstall");
+                            client.shutdown().ok();
+                            drop(client);
+                            std::thread::sleep(Duration::from_millis(500));
+                            super::helper_install::install_helper()?;
+                        }
+                    }
+                    Self::kickstart_and_wait()?;
+                    tracing::info!("Helper daemon upgraded to {gui_version}");
+                }
+            }
+        }
+
+        // Bind this GUI process to the helper (idempotent for same PID)
+        let mut client = Self::connect()?;
+        let pid = std::process::id();
+        client
+            .bind(pid)
+            .map_err(|e| format!("Failed to bind helper: {e}"))?;
+
+        let version = client.version().unwrap_or_else(|_| "unknown".to_string());
+        Ok(version)
+    }
+
+    /// Kickstart the helper daemon and wait for it to become available.
+    fn kickstart_and_wait() -> Result<(), String> {
         super::helper_install::kickstart_helper()?;
 
         for _ in 0..50 {
@@ -43,7 +104,6 @@ impl HelperClient {
                 return Ok(());
             }
         }
-
         Err("Helper daemon did not start in time".to_string())
     }
 
@@ -107,6 +167,18 @@ impl HelperClient {
     /// Bind the helper to the current GUI process PID.
     pub fn bind(&mut self, pid: u32) -> Result<(), String> {
         self.send(&Request::Bind { pid })?;
+        match self.recv()? {
+            Response::Ok => Ok(()),
+            Response::Error { message } => Err(message),
+            other => Err(format!("Unexpected response: {other:?}")),
+        }
+    }
+
+    /// Ask the helper to replace its own binary and shutdown for restart.
+    pub fn upgrade(&mut self, binary_path: &Path) -> Result<(), String> {
+        self.send(&Request::Upgrade {
+            binary_path: binary_path.to_string_lossy().to_string(),
+        })?;
         match self.recv()? {
             Response::Ok => Ok(()),
             Response::Error { message } => Err(message),

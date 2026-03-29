@@ -97,7 +97,7 @@ pub fn extract_kernel(
         .unwrap_or_default()
         .to_string_lossy();
 
-    let dest = dest_dir.join(format!("sing-box-{tag}"));
+    let dest = dest_dir.join(tag);
 
     if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
         extract_tar_gz(archive_path, &dest)?;

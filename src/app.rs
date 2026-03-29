@@ -1,8 +1,8 @@
 use eframe::egui;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 use tray_icon::{TrayIconBuilder, TrayIconEvent};
 
@@ -106,7 +106,7 @@ impl BoxApp {
 
         let settings_manager = SettingsManager::new(data_dir);
 
-        let kernel_path = settings_manager.active_kernel_path().map(|p| p.to_path_buf());
+        let kernel_path = settings_manager.active_kernel_path();
         let (clash_api_base, clash_api_secret) = {
             let (addr, secret) = settings_manager.active_clash_api_info();
             (addr.unwrap_or_default(), secret.unwrap_or_default())
@@ -118,15 +118,32 @@ impl BoxApp {
 
         let settings_state = ui::settings::SettingsState::default();
 
-        // Auto-update helper daemon if installed but outdated
-        if crate::core::helper_install::needs_update() {
-            match crate::core::helper_install::update_helper() {
-                Ok(()) => tracing::info!("Helper daemon updated to {}", env!("CARGO_PKG_VERSION")),
-                Err(e) => tracing::warn!("Failed to update helper daemon: {e}"),
+        let toasts: Toasts = Arc::new(Mutex::new(VecDeque::new()));
+
+        // Create KernelManager first — its stale-helper check must run BEFORE
+        // ensure_running() so we can detect another GUI instance's helper.
+        let mut kernel_manager = KernelManager::new(kernel_path);
+
+        // Now ensure helper daemon is running and up-to-date (self-upgrades via IPC, no password)
+        if crate::core::helper_install::is_installed() {
+            match crate::core::helper_client::HelperClient::ensure_running() {
+                Ok(version) => {
+                    push_toast(
+                        &toasts,
+                        ToastKind::Success,
+                        format!("Helper daemon connected (v{version})"),
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to ensure helper daemon: {e}");
+                    push_toast(
+                        &toasts,
+                        ToastKind::Error,
+                        format!("Helper daemon error: {e}"),
+                    );
+                }
             }
         }
-
-        let mut kernel_manager = KernelManager::new(kernel_path);
 
         // Auto-start kernel if configured
         if settings_manager.launch_core_on_start()
@@ -144,8 +161,12 @@ impl BoxApp {
         let tray_menu = Menu::new();
         let show_item = MenuItem::new("Show", true, None);
         let quit_item = MenuItem::new("Quit", true, None);
-        tray_menu.append(&show_item).expect("failed to add tray menu item");
-        tray_menu.append(&quit_item).expect("failed to add tray menu item");
+        tray_menu
+            .append(&show_item)
+            .expect("failed to add tray menu item");
+        tray_menu
+            .append(&quit_item)
+            .expect("failed to add tray menu item");
 
         let show_id = show_item.id().clone();
         let quit_id = quit_item.id().clone();
@@ -207,7 +228,7 @@ impl BoxApp {
             clash_api_base,
             clash_api_secret,
             http_client: reqwest::Client::new(),
-            toasts: Arc::new(Mutex::new(VecDeque::new())),
+            toasts,
             dashboard_state: ui::dashboard::DashboardState::default(),
             outbounds_state: ui::outbounds::OutboundsState::default(),
             connections_state: ui::connections::ConnectionsState::default(),
@@ -280,11 +301,17 @@ impl eframe::App for BoxApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             self.window_visible.store(false, Ordering::Relaxed);
             // Disconnect Clash API WebSockets while hidden
-            self.dashboard_state.polling_flag.store(false, Ordering::Relaxed);
+            self.dashboard_state
+                .polling_flag
+                .store(false, Ordering::Relaxed);
             self.dashboard_state.traffic_polling = false;
-            self.connections_state.streaming_flag.store(false, Ordering::Relaxed);
+            self.connections_state
+                .streaming_flag
+                .store(false, Ordering::Relaxed);
             self.connections_state.streaming = false;
-            self.logs_state.streaming_flag.store(false, Ordering::Relaxed);
+            self.logs_state
+                .streaming_flag
+                .store(false, Ordering::Relaxed);
             self.logs_state.streaming = false;
         }
 
@@ -324,9 +351,10 @@ impl eframe::App for BoxApp {
                     ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                         ui.add_space(8.0);
 
-                        // Traffic speed
+                        // Traffic speed (bottom_up: render download first so it appears below upload)
                         let (up, down) = self.dashboard_state.current_speed();
-                        ui.label(format!("↑{} ↓{}", crate::core::format_speed(up), crate::core::format_speed(down)));
+                        ui.label(format!("↓{}", crate::core::format_speed(down)));
+                        ui.label(format!("↑{}", crate::core::format_speed(up)));
 
                         // Core status
                         let (status_text, status_color) = if self.cached_is_running {
@@ -353,4 +381,3 @@ impl eframe::App for BoxApp {
         self.show_toasts(&ctx);
     }
 }
-

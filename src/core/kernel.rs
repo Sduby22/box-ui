@@ -25,28 +25,30 @@ impl KernelManager {
         mgr
     }
 
-    /// On startup, verify no helper daemon is already running.
-    /// A running helper means it is bound to a previous GUI process — we must not
-    /// take it over. The user should wait for the old helper to exit or kill it manually.
+    /// On startup, verify no helper daemon is already bound to another GUI process.
+    /// Must be called BEFORE `ensure_running()` — at this point any live helper
+    /// must belong to a previous/concurrent GUI instance.
     fn check_no_stale_helper(&self) {
         if !super::helper_install::is_installed() {
             return;
         }
-        if super::helper_client::HelperClient::is_available() {
-            tracing::error!(
-                "A helper daemon is already running (bound to another GUI process). \
-                 Cannot start a second instance."
-            );
-            // Show a native error dialog before exiting
-            rfd::MessageDialog::new()
-                .set_level(rfd::MessageLevel::Error)
-                .set_title("Box UI")
-                .set_description(
-                    "A helper daemon is already running and bound to another Box UI instance.\n\
-                     Please close the other instance first, or wait for the helper to exit.",
-                )
-                .show();
-            std::process::exit(1);
+        if let Ok(mut client) = super::helper_client::HelperClient::connect() {
+            // Try to bind our PID. If it succeeds, the helper was either unbound
+            // (orphaned) or already ours — both are fine. If it fails, another
+            // GUI instance owns it.
+            let pid = std::process::id();
+            if let Err(e) = client.bind(pid) {
+                tracing::error!("Helper daemon is bound to another GUI process: {e}");
+                rfd::MessageDialog::new()
+                    .set_level(rfd::MessageLevel::Error)
+                    .set_title("Box UI")
+                    .set_description(
+                        "A helper daemon is already running and bound to another Box UI instance.\n\
+                         Please close the other instance first, or wait for the helper to exit.",
+                    )
+                    .show();
+                std::process::exit(1);
+            }
         }
     }
 
@@ -105,9 +107,6 @@ impl KernelManager {
 
         let mut client = HelperClient::connect()
             .map_err(|e| format!("Failed to connect to helper: {e}"))?;
-
-        let pid = std::process::id();
-        client.bind(pid).map_err(|e| format!("Failed to bind helper: {e}"))?;
 
         client.start(kernel_path, config_path, working_dir)?;
 

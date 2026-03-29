@@ -74,10 +74,15 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
                 if !installed {
                     ui.colored_label(egui::Color32::GRAY, "Not installed");
                 } else if available {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(80, 200, 120),
-                        "Installed & Running",
-                    );
+                    let version_str =
+                        crate::core::helper_client::HelperClient::connect()
+                            .ok()
+                            .and_then(|mut c| c.version().ok());
+                    let label = match &version_str {
+                        Some(v) => format!("Installed & Running (v{v})"),
+                        None => "Installed & Running".to_string(),
+                    };
+                    ui.colored_label(egui::Color32::from_rgb(80, 200, 120), label);
                 } else {
                     ui.colored_label(
                         egui::Color32::from_rgb(255, 200, 50),
