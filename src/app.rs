@@ -306,8 +306,8 @@ impl eframe::App for BoxApp {
 
                         // Traffic speed (bottom_up: render download first so it appears below upload)
                         let (up, down) = self.dashboard_state.current_speed();
-                        ui.label(format!("↓{}", crate::core::format_speed(down)));
-                        ui.label(format!("↑{}", crate::core::format_speed(up)));
+                        ui.label(format!("↓ {}", crate::core::format_speed(down)));
+                        ui.label(format!("↑ {}", crate::core::format_speed(up)));
 
                         // Core status
                         let (status_text, status_color) = if self.cached_is_running {

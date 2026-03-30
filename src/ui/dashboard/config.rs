@@ -123,7 +123,7 @@ pub fn show_config_manager(ui: &mut egui::Ui, app: &mut BoxApp) {
                 action = Some(ConfigAction::SetActive(config.id));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("🗑").clicked() {
+                if ui.add_enabled(!is_active, egui::Button::new("🗑").small()).clicked() {
                     action = Some(ConfigAction::Remove(config.id));
                 }
                 if ui.small_button("✏").clicked() {

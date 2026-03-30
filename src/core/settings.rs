@@ -187,10 +187,6 @@ impl SettingsManager {
         if let Some(pos) = self.settings.configs.iter().position(|c| c.id == id) {
             let entry = self.settings.configs.remove(pos);
             std::fs::remove_file(&entry.path).ok();
-            if self.settings.active_config == Some(id) {
-                self.settings.active_config = None;
-                self.ensure_active_config();
-            }
             self.save();
         }
     }

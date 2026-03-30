@@ -68,10 +68,12 @@ pub fn show_kernel_manager(ui: &mut egui::Ui, app: &mut BoxApp) {
                 .set_kernel_path(app.settings_manager.active_kernel_path());
         }
 
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         if ui.small_button("+ Download").clicked() {
-            app.dashboard_state.kernel.show_releases_window = true;
-            fetch_releases(app);
-        }
+                app.dashboard_state.kernel.show_releases_window = true;
+                fetch_releases(app);
+            }
+        });
     });
 
     ui.horizontal(|ui| {
@@ -282,8 +284,23 @@ pub fn show_releases_window(ctx: &egui::Context, app: &mut BoxApp) {
                                 |ui| {
                                     let is_installed = installed_versions.iter().any(|v| v == tag);
                                     if is_installed {
-                                        ui.add_enabled(false, egui::Button::new("Installed"));
-                                        if ui.small_button("🗑").clicked() {
+                                        ui.weak("Installed");
+                                        let is_active_kernel = app
+                                            .settings_manager
+                                            .active_kernel_name()
+                                            .is_some_and(|name| {
+                                                name == tag
+                                                    || name
+                                                        .strip_suffix(".exe")
+                                                        .is_some_and(|n| n == tag)
+                                            });
+                                        if ui
+                                            .add_enabled(
+                                                !is_active_kernel,
+                                                egui::Button::new("🗑").small(),
+                                            )
+                                            .clicked()
+                                        {
                                             delete_tag = Some(tag.clone());
                                         }
                                     } else if ui
@@ -400,19 +417,7 @@ fn delete_kernel(app: &mut BoxApp, tag: &str) {
     } else {
         tag.to_string()
     };
-    let is_active = app.settings_manager.active_kernel_name() == Some(&filename);
-    if is_active && app.cached_is_running {
-        push_toast(
-            &app.toasts,
-            ToastKind::Error,
-            "Cannot delete the running kernel".to_string(),
-        );
-        return;
-    }
     app.settings_manager.remove_kernel(&filename);
-    if is_active {
-        app.kernel_manager.set_kernel_path(None);
-    }
     push_toast(
         &app.toasts,
         ToastKind::Success,

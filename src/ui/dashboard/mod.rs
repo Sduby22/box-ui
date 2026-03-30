@@ -30,7 +30,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
 
     ui.add_space(12.0);
 
-    // Configuration + Core management side by side
+
     ui.columns(2, |columns| {
         columns[0].group(|ui| {
             config::show_config_manager(ui, app);
