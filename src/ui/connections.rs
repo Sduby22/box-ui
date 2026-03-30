@@ -110,6 +110,14 @@ impl Default for ConnectionsState {
 }
 
 impl ConnectionsState {
+    /// Clear cached speed state to free memory when the window is hidden.
+    pub fn clear_speed_cache(&mut self) {
+        self.prev_bytes.clear();
+        self.speeds.clear();
+        self.last_snapshot_len = 0;
+        self.last_snapshot_bytes = 0;
+    }
+
     /// Update speed calculations from current connections snapshot.
     /// Only recalculates when the underlying data has actually changed
     /// (new WebSocket message), not on every UI repaint.

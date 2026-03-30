@@ -7,7 +7,6 @@ mod ui;
 
 use eframe::egui;
 use std::process::Child;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Shared 128x128 app icon PNG, embedded at compile time.
@@ -22,11 +21,9 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 #[cfg(feature = "heap-profile")]
 pub static HEAP_PROFILER: std::sync::Mutex<Option<dhat::Profiler>> = std::sync::Mutex::new(None);
 
-/// Shared state between the tray event thread and the main/window loops.
+/// Shared state between the tray event thread and the eframe window.
 pub struct TrayState {
-    /// Signal from tray "Show" action to create a new window.
-    pub show_requested: AtomicBool,
-    /// egui context when a window is active (allows tray thread to focus an existing window).
+    /// egui context for the window (allows tray thread to show/focus it).
     pub egui_ctx: Mutex<Option<egui::Context>>,
 }
 
@@ -142,7 +139,6 @@ fn main() -> eframe::Result<()> {
         .expect("failed to build tray icon");
 
     let tray_state = Arc::new(TrayState {
-        show_requested: AtomicBool::new(true), // show window on first launch
         egui_ctx: Mutex::new(None),
     });
 
@@ -157,15 +153,12 @@ fn main() -> eframe::Result<()> {
                 loop {
                     if let Ok(event) = menu_rx.try_recv() {
                         if event.id() == &show_id {
-                            let ctx_guard = tray.egui_ctx.lock().unwrap();
-                            if let Some(ctx) = ctx_guard.as_ref() {
-                                // Window already exists — just focus it.
+                            // Clone ctx and drop the lock before calling egui methods.
+                            let ctx_opt = tray.egui_ctx.lock().unwrap().clone();
+                            if let Some(ctx) = ctx_opt {
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                                 ctx.request_repaint();
-                            } else {
-                                drop(ctx_guard);
-                                tray.show_requested.store(true, Ordering::Relaxed);
                             }
                         } else if event.id() == &quit_id {
                             core::kernel::shutdown_backend(&backend);
@@ -182,60 +175,24 @@ fn main() -> eframe::Result<()> {
             .expect("failed to spawn tray event thread");
     }
 
-    // Main window lifecycle loop.
-    // Each iteration creates an eframe window; when the user closes it, eframe
-    // returns and ALL egui/eframe memory is freed. Only the tray icon and the
-    // kernel child process survive. On tray "Show", a fresh window is created.
-    loop {
-        // Wait for a show signal (first iteration starts immediately).
-        while !tray_state.show_requested.swap(false, Ordering::Relaxed) {
-            pump_platform_messages();
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
+    // The window is never destroyed — close events are always cancelled and the
+    // window is hidden instead. This keeps the platform event loop (NSApplication
+    // on macOS) alive, which is required for the tray icon to remain responsive.
+    let icon =
+        eframe::icon_data::from_png_bytes(APP_ICON_PNG).expect("failed to decode app icon");
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([900.0, 600.0])
+            .with_min_inner_size([700.0, 450.0])
+            .with_icon(std::sync::Arc::new(icon)),
+        ..Default::default()
+    };
 
-        let icon =
-            eframe::icon_data::from_png_bytes(APP_ICON_PNG).expect("failed to decode app icon");
-        let options = eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default()
-                .with_inner_size([900.0, 600.0])
-                .with_min_inner_size([700.0, 450.0])
-                .with_icon(std::sync::Arc::new(icon)),
-            ..Default::default()
-        };
-
-        let backend = kernel_backend.clone();
-        let tray = tray_state.clone();
-        if let Err(e) = eframe::run_native(
-            "Box UI",
-            options,
-            Box::new(move |cc| Ok(Box::new(app::BoxApp::new(cc, backend, tray)))),
-        ) {
-            tracing::error!("eframe error: {e}");
-        }
-
-        // Window was destroyed — clear egui context so the tray thread knows
-        // to signal a new window instead of trying to focus a dead one.
-        *tray_state.egui_ctx.lock().unwrap() = None;
-    }
-}
-
-/// Pump platform messages to keep the tray icon responsive between eframe sessions.
-/// On Windows, tray-icon uses a hidden HWND whose messages must be dispatched.
-/// On other platforms this is a no-op (tray-icon uses D-Bus / platform APIs
-/// that handle events internally).
-#[inline]
-fn pump_platform_messages() {
-    #[cfg(target_os = "windows")]
-    {
-        use windows::Win32::UI::WindowsAndMessaging::{
-            DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage,
-        };
-        unsafe {
-            let mut msg = MSG::default();
-            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).into() {
-                let _ = TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            }
-        }
-    }
+    eframe::run_native(
+        "Box UI",
+        options,
+        Box::new(move |cc| {
+            Ok(Box::new(app::BoxApp::new(cc, kernel_backend, tray_state)))
+        }),
+    )
 }

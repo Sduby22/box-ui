@@ -169,11 +169,15 @@ impl eframe::App for BoxApp {
     fn ui(&mut self, root_ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = root_ui.ctx().clone();
 
-        // Handle window close: behaviour depends on release_memory_on_hide setting.
-        // When enabled: stop streams and let the window destroy (frees all egui memory,
-        // recreated on tray "Show"). When disabled: cancel the close and hide the
-        // window instead (faster restore, but keeps memory allocated).
+        // Handle window close: always cancel and hide instead of destroying.
+        // On macOS, letting eframe::run_native return terminates the
+        // NSApplication event loop, which makes the tray icon unresponsive.
+        // When release_memory_on_hide is enabled, we additionally clear heavy
+        // application state and egui caches to reduce memory while hidden.
         if ctx.input(|i| i.viewport().close_requested()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+
             // Always stop background streams to save CPU while hidden
             self.dashboard_state
                 .polling_flag
@@ -186,12 +190,19 @@ impl eframe::App for BoxApp {
                 .streaming_flag
                 .store(false, Ordering::Relaxed);
 
-            if !self.settings_manager.release_memory_on_hide() {
-                // Keep the window alive but hidden — faster restore
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            if self.settings_manager.release_memory_on_hide() {
+                // Clear heavy application state to free memory while hidden.
+                self.dashboard_state.traffic_history.lock().unwrap().clear();
+                self.connections_state.connections.lock().unwrap().clear();
+                self.connections_state.clear_speed_cache();
+                self.outbounds_state.groups.lock().unwrap().clear();
+                self.outbounds_state.expanded.clear();
+                self.outbounds_state.last_fetch = None;
+                self.logs_state.entries.lock().unwrap().clear();
+                self.toasts.lock().unwrap().clear();
+                // Clear egui's internal layout/paint caches.
+                ctx.memory_mut(|m| *m = Default::default());
             }
-            // else: let the close proceed — window will be destroyed and recreated
         }
 
         // Cache is_running once per frame (avoids repeated Mutex lock + try_wait syscall)
