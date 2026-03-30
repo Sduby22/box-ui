@@ -262,12 +262,13 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
     };
 
     let entries = app.logs_state.entries.lock().unwrap();
-    let query = app.logs_state.search_query.to_lowercase();
+    let query = app.logs_state.search_query.as_str();
     let has_filter = !query.is_empty();
 
     scroll.show(ui, |ui| {
         for entry in entries.iter() {
-            if has_filter && !entry.payload.to_lowercase().contains(&query) {
+            // Case-insensitive substring match without per-entry String allocation
+            if has_filter && !contains_ignore_ascii_case(&entry.payload, query) {
                 continue;
             }
             let text = egui::RichText::new(&entry.formatted)
@@ -342,4 +343,22 @@ fn start_log_streaming(app: &mut BoxApp) {
 
         streaming_flag.store(false, Ordering::Relaxed);
     });
+}
+
+/// Case-insensitive ASCII substring search without heap allocation.
+fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    if needle.len() > haystack.len() {
+        return false;
+    }
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    'outer: for start in 0..=(h.len() - n.len()) {
+        for j in 0..n.len() {
+            if !h[start + j].eq_ignore_ascii_case(&n[j]) {
+                continue 'outer;
+            }
+        }
+        return true;
+    }
+    false
 }

@@ -136,12 +136,13 @@ impl SettingsManager {
 
     pub fn import_local_config(&mut self, name: &str, source_path: &Path) -> Result<(), String> {
         let id = Uuid::new_v4();
-        let file_name = source_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("config.json");
+        let ext = source_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("json");
 
-        let dest = self.configs_dir.join(file_name);
+        // Use UUID as filename to avoid collisions between configs with the same name
+        let dest = self.configs_dir.join(format!("{id}.{ext}"));
         std::fs::copy(source_path, &dest).map_err(|e| format!("Failed to copy config: {e}"))?;
 
         let entry = ConfigEntry {
@@ -158,7 +159,8 @@ impl SettingsManager {
 
     pub fn add_remote_config(&mut self, name: String, url: String, refresh_interval_minutes: u32) {
         let id = Uuid::new_v4();
-        let dest = self.configs_dir.join(&name);
+        // Use UUID as filename to prevent path traversal from user-supplied names
+        let dest = self.configs_dir.join(format!("{id}.json"));
         let entry = ConfigEntry {
             id,
             name,
@@ -222,8 +224,10 @@ impl SettingsManager {
         }
     }
 
-    pub fn config_path(&self, name: &str) -> PathBuf {
-        self.configs_dir.join(name)
+    /// Generate a new unique config file path in the configs directory.
+    /// Uses a UUID filename to prevent path traversal from user-supplied names.
+    pub fn new_config_path(&self) -> PathBuf {
+        self.configs_dir.join(format!("{}.json", Uuid::new_v4()))
     }
 
     /// Parse the Clash API address and secret from the active config file.

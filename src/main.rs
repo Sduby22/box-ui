@@ -150,26 +150,25 @@ fn main() -> eframe::Result<()> {
             .name("tray-events".into())
             .spawn(move || {
                 let menu_rx = MenuEvent::receiver();
-                loop {
-                    if let Ok(event) = menu_rx.try_recv() {
-                        if event.id() == &show_id {
-                            // Clone ctx and drop the lock before calling egui methods.
-                            let ctx_opt = tray.egui_ctx.lock().unwrap().clone();
-                            if let Some(ctx) = ctx_opt {
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                                ctx.request_repaint();
-                            }
-                        } else if event.id() == &quit_id {
-                            core::kernel::shutdown_backend(&backend);
-                            #[cfg(feature = "heap-profile")]
-                            {
-                                let _ = crate::HEAP_PROFILER.lock().unwrap().take();
-                            }
-                            std::process::exit(0);
+                // Block on recv() instead of busy-polling with try_recv + sleep.
+                // Zero CPU usage while idle, instant response on menu click.
+                while let Ok(event) = menu_rx.recv() {
+                    if event.id() == &show_id {
+                        // Clone ctx and drop the lock before calling egui methods.
+                        let ctx_opt = tray.egui_ctx.lock().unwrap().clone();
+                        if let Some(ctx) = ctx_opt {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                            ctx.request_repaint();
                         }
+                    } else if event.id() == &quit_id {
+                        core::kernel::shutdown_backend(&backend);
+                        #[cfg(feature = "heap-profile")]
+                        {
+                            let _ = crate::HEAP_PROFILER.lock().unwrap().take();
+                        }
+                        std::process::exit(0);
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(50));
                 }
             })
             .expect("failed to spawn tray event thread");

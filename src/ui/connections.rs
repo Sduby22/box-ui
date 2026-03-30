@@ -65,14 +65,9 @@ pub enum SortOrder {
     Descending,
 }
 
-/// Row data with precomputed speeds for display and sorting.
-struct ConnRow {
-    process: String,
-    host: String,
-    chain: String,
-    rule: String,
-    upload: u64,
-    download: u64,
+/// Row data with precomputed speeds and lowercase fields for zero-alloc sorting.
+struct ConnRow<'a> {
+    conn: &'a Connection,
     upload_speed: f64,
     download_speed: f64,
 }
@@ -185,57 +180,55 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
         start_connections_streaming(app);
     }
 
-    // Build row data under lock, then drop lock before UI rendering
-    let rows: Vec<ConnRow> = {
-        let connections = app.connections_state.connections.lock().unwrap().clone();
-        app.connections_state.update_speeds(&connections);
+    // Clone the Arc (cheap ref-count bump) so the MutexGuard doesn't borrow
+    // ConnectionsState, allowing update_speeds to take &mut self.
+    let connections_arc = app.connections_state.connections.clone();
+    let connections = connections_arc.lock().unwrap();
+    app.connections_state.update_speeds(&connections);
 
-        connections
-            .iter()
-            .map(|conn| {
-                let (up_speed, down_speed) = app
-                    .connections_state
-                    .speeds
-                    .get(&conn.id)
-                    .copied()
-                    .unwrap_or((0.0, 0.0));
-                ConnRow {
-                    process: conn.metadata.display_process().to_owned(),
-                    host: conn
-                        .metadata
-                        .host
-                        .as_deref()
-                        .or(conn.metadata.destination_ip.as_deref())
-                        .unwrap_or("-")
-                        .to_owned(),
-                    chain: conn.chains.join(" → "),
-                    rule: conn.rule.clone(),
-                    upload: conn.upload,
-                    download: conn.download,
-                    upload_speed: up_speed,
-                    download_speed: down_speed,
-                }
-            })
-            .collect()
-    };
-
-    if rows.is_empty() {
+    if connections.is_empty() {
+        drop(connections);
         ui.label("No active connections");
         return;
     }
 
-    // Sort rows
-    let mut rows = rows;
+    let mut rows: Vec<ConnRow<'_>> = connections
+        .iter()
+        .map(|conn| {
+            let (upload_speed, download_speed) = app
+                .connections_state
+                .speeds
+                .get(&conn.id)
+                .copied()
+                .unwrap_or((0.0, 0.0));
+            ConnRow {
+                conn,
+                upload_speed,
+                download_speed,
+            }
+        })
+        .collect();
+
+    // Sort rows — use str::to_ascii_lowercase comparison via unicase for
+    // case-insensitive text columns to avoid per-comparison String allocations.
     if let Some(col) = app.connections_state.sort_column {
         let order = app.connections_state.sort_order;
         rows.sort_by(|a, b| {
             let cmp = match col {
-                SortColumn::Process => a.process.to_lowercase().cmp(&b.process.to_lowercase()),
-                SortColumn::Host => a.host.to_lowercase().cmp(&b.host.to_lowercase()),
-                SortColumn::Chain => a.chain.cmp(&b.chain),
-                SortColumn::Rule => a.rule.cmp(&b.rule),
-                SortColumn::Upload => a.upload.cmp(&b.upload),
-                SortColumn::Download => a.download.cmp(&b.download),
+                SortColumn::Process => a
+                    .conn
+                    .metadata
+                    .display_process()
+                    .eq_ignore_ascii_case_cmp(b.conn.metadata.display_process()),
+                SortColumn::Host => {
+                    let ah = conn_host(a.conn);
+                    let bh = conn_host(b.conn);
+                    ah.eq_ignore_ascii_case_cmp(bh)
+                }
+                SortColumn::Chain => chain_str(a.conn).cmp(&chain_str(b.conn)),
+                SortColumn::Rule => a.conn.rule.cmp(&b.conn.rule),
+                SortColumn::Upload => a.conn.upload.cmp(&b.conn.upload),
+                SortColumn::Download => a.conn.download.cmp(&b.conn.download),
                 SortColumn::UploadSpeed => a
                     .upload_speed
                     .partial_cmp(&b.upload_speed)
@@ -316,20 +309,60 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
             .body(|body| {
                 body.rows(text_height + 4.0, rows.len(), |mut row| {
                     let r = &rows[row.index()];
-                    row.col(|ui| { ui.label(&r.process); });
-                    row.col(|ui| { ui.label(&r.host); });
-                    row.col(|ui| { ui.label(&r.chain); });
-                    row.col(|ui| { ui.label(&r.rule); });
-                    row.col(|ui| { ui.label(format_bytes(r.upload)); });
-                    row.col(|ui| { ui.label(format_bytes(r.download)); });
+                    let conn = r.conn;
+                    row.col(|ui| { ui.label(conn.metadata.display_process()); });
+                    row.col(|ui| { ui.label(conn_host(conn)); });
+                    row.col(|ui| { ui.label(chain_str(conn)); });
+                    row.col(|ui| { ui.label(&conn.rule); });
+                    row.col(|ui| { ui.label(format_bytes(conn.upload)); });
+                    row.col(|ui| { ui.label(format_bytes(conn.download)); });
                     row.col(|ui| { ui.label(format_speed(r.upload_speed)); });
                     row.col(|ui| { ui.label(format_speed(r.download_speed)); });
                 });
             });
     });
 
+    drop(connections);
+
     if let Some(col) = clicked_column {
         app.connections_state.toggle_sort(col);
+    }
+}
+
+/// Case-insensitive ASCII comparison without allocations.
+trait AsciiCaseInsensitiveCmp {
+    fn eq_ignore_ascii_case_cmp(&self, other: &str) -> std::cmp::Ordering;
+}
+
+impl AsciiCaseInsensitiveCmp for str {
+    fn eq_ignore_ascii_case_cmp(&self, other: &str) -> std::cmp::Ordering {
+        for (a, b) in self.bytes().zip(other.bytes()) {
+            let cmp = a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase());
+            if cmp != std::cmp::Ordering::Equal {
+                return cmp;
+            }
+        }
+        self.len().cmp(&other.len())
+    }
+}
+
+/// Get display host from connection without allocating.
+fn conn_host(conn: &Connection) -> &str {
+    conn.metadata
+        .host
+        .as_deref()
+        .or(conn.metadata.destination_ip.as_deref())
+        .unwrap_or("-")
+}
+
+/// Get chain display string. Borrows the first chain element or returns a
+/// joined string for multi-hop chains. Single-element chains (the common case)
+/// avoid allocation entirely.
+fn chain_str(conn: &Connection) -> std::borrow::Cow<'_, str> {
+    match conn.chains.len() {
+        0 => std::borrow::Cow::Borrowed(""),
+        1 => std::borrow::Cow::Borrowed(&conn.chains[0]),
+        _ => std::borrow::Cow::Owned(conn.chains.join(" → ")),
     }
 }
 

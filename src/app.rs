@@ -126,10 +126,10 @@ impl BoxApp {
     fn show_toasts(&self, ctx: &egui::Context) {
         let now = std::time::Instant::now();
 
-        // Remove expired toasts
-        self.toasts.lock().unwrap().retain(|t| t.expires_at > now);
+        // Single lock: remove expired toasts and render in one pass
+        let mut toasts = self.toasts.lock().unwrap();
+        toasts.retain(|t| t.expires_at > now);
 
-        let toasts = self.toasts.lock().unwrap().clone();
         if toasts.is_empty() {
             return;
         }
@@ -137,7 +137,7 @@ impl BoxApp {
         egui::Area::new(egui::Id::new("toasts"))
             .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -20.0])
             .show(ctx, |ui| {
-                for toast in &toasts {
+                for toast in toasts.iter() {
                     let (bg, text_color) = match toast.kind {
                         ToastKind::Info => (
                             egui::Color32::from_rgba_premultiplied(50, 50, 50, 220),
@@ -202,6 +202,16 @@ impl eframe::App for BoxApp {
                 self.toasts.lock().unwrap().clear();
                 // Clear egui's internal layout/paint caches.
                 ctx.memory_mut(|m| *m = Default::default());
+
+                // On Windows, freed Rust memory stays in the process working set
+                // until the OS decides to reclaim it. Explicitly trim the working
+                // set so Task Manager reflects the reduction immediately.
+                #[cfg(target_os = "windows")]
+                {
+                    use windows_sys::Win32::System::ProcessStatus::EmptyWorkingSet;
+                    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+                    unsafe { EmptyWorkingSet(GetCurrentProcess()); }
+                }
             }
         }
 

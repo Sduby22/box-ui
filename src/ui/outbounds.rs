@@ -66,28 +66,16 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
     // Hold lock during rendering instead of cloning
     let groups = app.outbounds_state.groups.lock().unwrap();
 
-    // Sort indices so "Global" (exact match) appears last
-    let mut sorted_indices: Vec<usize> = (0..groups.len()).collect();
-    sorted_indices.sort_by(|&a, &b| {
-        let a_global = groups[a].name == "GLOBAL";
-        let b_global = groups[b].name == "GLOBAL";
-        a_global.cmp(&b_global)
-    });
-
-    // Collect group names for collapse all / expand all
-    let all_group_names: Vec<String> = groups
-        .iter()
-        .filter(|g| g.all.as_ref().is_some_and(|n| !n.is_empty()))
-        .map(|g| g.name.clone())
-        .collect();
-
     ui.horizontal(|ui| {
         if ui.button("Collapse All").clicked() {
             app.outbounds_state.expanded.clear();
         }
         if ui.button("Expand All").clicked() {
-            for name in &all_group_names {
-                app.outbounds_state.expanded.insert(name.clone());
+            // Insert directly from the lock — no intermediate Vec needed
+            for g in groups.iter() {
+                if g.all.as_ref().is_some_and(|n| !n.is_empty()) {
+                    app.outbounds_state.expanded.insert(g.name.clone());
+                }
             }
         }
     });
@@ -96,8 +84,10 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
     let mut switch_action: Option<(String, String)> = None;
 
     egui::ScrollArea::vertical().show(ui, |ui| {
-        for &idx in &sorted_indices {
-            let group = &groups[idx];
+        // Two-pass render: non-GLOBAL groups first, then GLOBAL — avoids sorted_indices Vec
+        for group in groups.iter().filter(|g| g.name != "GLOBAL")
+            .chain(groups.iter().filter(|g| g.name == "GLOBAL"))
+        {
             let nodes = match &group.all {
                 Some(nodes) if !nodes.is_empty() => nodes,
                 _ => continue,

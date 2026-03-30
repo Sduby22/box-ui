@@ -128,7 +128,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
     ui.heading("Dashboard");
     ui.add_space(8.0);
 
-    // Traffic chart
+    // Traffic chart — share history via Arc to avoid per-frame Vec clone
     ui.group(|ui| {
         ui.label("Traffic Speed");
         let history = app.dashboard_state.traffic_history.lock().unwrap();
@@ -142,7 +142,8 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
             .enumerate()
             .map(|(i, p)| [i as f64, p.download])
             .collect();
-        let history_snapshot: Vec<TrafficPoint> = history.iter().cloned().collect();
+        // Cheap Arc clone for the label_formatter closure instead of copying all points
+        let history_ref = app.dashboard_state.traffic_history.clone();
         drop(history);
 
         let upload_line =
@@ -161,7 +162,8 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
             .y_axis_formatter(|mark, _range| format_speed_axis(mark.value))
             .label_formatter(move |_name, value| {
                 let idx = value.x.round() as usize;
-                if let Some(p) = history_snapshot.get(idx) {
+                let h = history_ref.lock().unwrap();
+                if let Some(p) = h.get(idx) {
                     format!(
                         "↑ {}\n↓ {}",
                         crate::core::format_speed(p.upload),
@@ -743,7 +745,7 @@ fn show_add_config_window(ctx: &egui::Context, app: &mut BoxApp) {
                                 "URL cannot be empty".to_string(),
                             );
                         } else if let Ok(interval) = interval_str.parse::<u32>() {
-                            let dest = app.settings_manager.config_path(&name);
+                            let dest = app.settings_manager.new_config_path();
 
                             let client = app.http_client.clone();
                             let toasts = app.toasts.clone();
@@ -883,7 +885,7 @@ fn show_edit_config_window(ctx: &egui::Context, app: &mut BoxApp) {
                             return;
                         }
                         // Re-fetch remote config on save; close window only on success
-                        let dest = app.settings_manager.config_path(&name);
+                        let dest = app.settings_manager.new_config_path();
                         let client = app.http_client.clone();
                         let toasts = app.toasts.clone();
                         let downloading_flag =
