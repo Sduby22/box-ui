@@ -2,6 +2,8 @@
 
 A lightweight, cross-platform GUI wrapper for [sing-box](https://github.com/SagerNet/sing-box), built with Rust and [egui](https://github.com/emilk/egui).
 
+> **This is a pure vibe coding project** — built entirely through natural language conversation with AI (Claude Code). If you're curious about how the project is structured and guided, check out [CLAUDE.md](CLAUDE.md).
+
 ## What It Does
 
 Box UI provides a minimal graphical interface for managing sing-box, replacing the need for command-line operation:
