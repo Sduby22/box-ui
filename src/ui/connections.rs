@@ -172,11 +172,8 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
     app.connections_state.streaming =
         app.connections_state.streaming_flag.load(Ordering::Relaxed);
 
-    // Start WebSocket streaming if core is running, window visible, and not already streaming
-    if app.cached_is_running
-        && app.window_visible.load(std::sync::atomic::Ordering::Relaxed)
-        && !app.connections_state.streaming
-    {
+    // Start WebSocket streaming if core is running and not already streaming
+    if app.cached_is_running && !app.connections_state.streaming {
         start_connections_streaming(app);
     }
 

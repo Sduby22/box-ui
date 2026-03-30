@@ -49,9 +49,8 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
     ui.heading("Outbounds");
     ui.add_space(8.0);
 
-    // Auto-refresh (only when window is visible)
-    let should_fetch = app.window_visible.load(Ordering::Relaxed)
-        && !app.outbounds_state.loading.load(Ordering::Relaxed)
+    // Auto-refresh
+    let should_fetch = !app.outbounds_state.loading.load(Ordering::Relaxed)
         && app
             .outbounds_state
             .last_fetch

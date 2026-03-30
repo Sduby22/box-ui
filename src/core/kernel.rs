@@ -12,10 +12,22 @@ pub struct KernelManager {
 }
 
 impl KernelManager {
+    #[allow(dead_code)]
     pub fn new(kernel_path: Option<PathBuf>) -> Self {
         Self {
             kernel_path,
             backend: Arc::new(Mutex::new(None)),
+            last_unexpected_exit: Mutex::new(None),
+            stderr: Mutex::new(None),
+        }
+    }
+
+    /// Create a KernelManager that reuses an existing shared backend.
+    /// Used to preserve a running kernel process across window destroy/recreate cycles.
+    pub fn with_backend(kernel_path: Option<PathBuf>, backend: Arc<Mutex<Option<Child>>>) -> Self {
+        Self {
+            kernel_path,
+            backend,
             last_unexpected_exit: Mutex::new(None),
             stderr: Mutex::new(None),
         }

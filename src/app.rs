@@ -1,12 +1,11 @@
 use eframe::egui;
 use std::collections::VecDeque;
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
-use tray_icon::menu::{Menu, MenuEvent, MenuItem};
-use tray_icon::{TrayIconBuilder, TrayIconEvent};
+use std::process::Child;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 
-use crate::core::kernel::{KernelManager, shutdown_backend};
+use crate::TrayState;
+use crate::core::kernel::KernelManager;
 use crate::core::settings::SettingsManager;
 use crate::ui;
 
@@ -63,14 +62,14 @@ pub struct BoxApp {
     pub runtime: tokio::runtime::Handle,
     /// Cached per-frame to avoid repeated Mutex lock + syscall
     pub cached_is_running: bool,
-    /// Whether the window is currently visible (shared with tray thread)
-    pub window_visible: Arc<AtomicBool>,
-    /// Keep the tray icon alive for the lifetime of the app
-    _tray_icon: tray_icon::TrayIcon,
 }
 
 impl BoxApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        kernel_backend: Arc<Mutex<Option<Child>>>,
+        tray_state: Arc<TrayState>,
+    ) -> Self {
         let runtime = tokio::runtime::Handle::current();
         let data_dir = dirs::data_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -88,104 +87,15 @@ impl BoxApp {
         };
 
         let max_log_lines = settings_manager.max_log_lines();
-
         let logs_state = ui::logs::LogsState::new(max_log_lines);
-
         let settings_state = ui::settings::SettingsState::default();
-
         let toasts: Toasts = Arc::new(Mutex::new(VecDeque::new()));
 
-        let mut kernel_manager = KernelManager::new(kernel_path);
+        // Reuse the persistent kernel backend so a running kernel survives window cycles.
+        let kernel_manager = KernelManager::with_backend(kernel_path, kernel_backend);
 
-        // Auto-elevate: if both launch-core-on-start and run-as-admin are enabled
-        // but the process is not elevated, relaunch immediately with admin privileges.
-        #[cfg(target_os = "windows")]
-        if settings_manager.launch_core_on_start()
-            && settings_manager.run_elevated()
-            && !crate::core::permissions::is_elevated()
-            && let Err(e) = crate::core::permissions::relaunch_elevated()
-        {
-            push_toast(
-                &toasts,
-                ToastKind::Error,
-                format!("Failed to relaunch as admin: {e}"),
-            );
-        }
-
-        // Auto-start kernel if configured
-        if settings_manager.launch_core_on_start()
-            && let Some(config) = settings_manager.active_config()
-        {
-            let path = config.path.clone();
-            let working_dir = settings_manager.working_dir();
-            let elevated = settings_manager.run_elevated();
-            if let Err(e) = kernel_manager.start(&path, working_dir, elevated) {
-                tracing::warn!("Auto-start kernel failed: {e}");
-            }
-        }
-
-        // Build system tray
-        let tray_menu = Menu::new();
-        let show_item = MenuItem::new("Show", true, None);
-        let quit_item = MenuItem::new("Quit", true, None);
-        tray_menu
-            .append(&show_item)
-            .expect("failed to add tray menu item");
-        tray_menu
-            .append(&quit_item)
-            .expect("failed to add tray menu item");
-
-        let show_id = show_item.id().clone();
-        let quit_id = quit_item.id().clone();
-
-        // Reuse the shared 128x128 PNG for the tray icon (already small enough).
-        let icon_data = eframe::icon_data::from_png_bytes(crate::APP_ICON_PNG)
-            .expect("failed to decode tray icon PNG");
-        let icon = tray_icon::Icon::from_rgba(icon_data.rgba, icon_data.width, icon_data.height)
-            .expect("failed to create tray icon");
-
-        let tray_icon = TrayIconBuilder::new()
-            .with_menu(Box::new(tray_menu))
-            .with_icon(icon)
-            .with_tooltip("Box UI")
-            .build()
-            .expect("failed to build tray icon");
-
-        let window_visible = Arc::new(AtomicBool::new(true));
-
-        // Background thread to handle tray events even when the window is hidden.
-        {
-            let ctx = cc.egui_ctx.clone();
-            let backend_for_tray = kernel_manager.backend.clone();
-            let visible_flag = window_visible.clone();
-            std::thread::spawn(move || {
-                let menu_rx = MenuEvent::receiver();
-                let icon_rx = TrayIconEvent::receiver();
-                loop {
-                    if let Ok(event) = menu_rx.try_recv() {
-                        if event.id() == &show_id {
-                            visible_flag.store(true, Ordering::Relaxed);
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                            ctx.request_repaint();
-                        } else if event.id() == &quit_id {
-                            shutdown_backend(&backend_for_tray);
-                            // Flush heap profiler before exit (exit skips Drop)
-                            #[cfg(feature = "heap-profile")]
-                            {
-                                let _ = crate::HEAP_PROFILER.lock().unwrap().take();
-                            }
-                            std::process::exit(0);
-                        }
-                    }
-                    // Drain icon events (hover, click, etc.) without acting on them;
-                    // all actions go through the menu.
-                    while icon_rx.try_recv().is_ok() {}
-
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-            });
-        }
+        // Store egui context so the tray thread can focus this window.
+        *tray_state.egui_ctx.lock().unwrap() = Some(cc.egui_ctx.clone());
 
         Self {
             current_tab: Tab::Dashboard,
@@ -202,8 +112,6 @@ impl BoxApp {
             settings_state,
             runtime,
             cached_is_running: false,
-            window_visible,
-            _tray_icon: tray_icon,
         }
     }
 
@@ -261,12 +169,12 @@ impl eframe::App for BoxApp {
     fn ui(&mut self, root_ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = root_ui.ctx().clone();
 
-        // Handle window close: hide to tray instead of quitting
+        // Handle window close: behaviour depends on release_memory_on_hide setting.
+        // When enabled: stop streams and let the window destroy (frees all egui memory,
+        // recreated on tray "Show"). When disabled: cancel the close and hide the
+        // window instead (faster restore, but keeps memory allocated).
         if ctx.input(|i| i.viewport().close_requested()) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            self.window_visible.store(false, Ordering::Relaxed);
-            // Disconnect Clash API WebSockets while hidden
+            // Always stop background streams to save CPU while hidden
             self.dashboard_state
                 .polling_flag
                 .store(false, Ordering::Relaxed);
@@ -274,11 +182,16 @@ impl eframe::App for BoxApp {
             self.connections_state
                 .streaming_flag
                 .store(false, Ordering::Relaxed);
-            self.connections_state.streaming = false;
             self.logs_state
                 .streaming_flag
                 .store(false, Ordering::Relaxed);
-            self.logs_state.streaming = false;
+
+            if !self.settings_manager.release_memory_on_hide() {
+                // Keep the window alive but hidden — faster restore
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
+            // else: let the close proceed — window will be destroyed and recreated
         }
 
         // Cache is_running once per frame (avoids repeated Mutex lock + try_wait syscall)

@@ -57,6 +57,26 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
 
         ui.add_space(8.0);
 
+        // Memory
+        ui.group(|ui| {
+            ui.label("Memory");
+            ui.add_space(4.0);
+
+            let mut release_mem = app.settings_manager.release_memory_on_hide();
+            if ui
+                .checkbox(&mut release_mem, "Release memory when hidden")
+                .on_hover_text(
+                    "When enabled, closing the window destroys all UI resources to minimize memory usage.\n\
+                     When disabled, the window is merely hidden for faster restore.",
+                )
+                .changed()
+            {
+                app.settings_manager.set_release_memory_on_hide(release_mem);
+            }
+        });
+
+        ui.add_space(8.0);
+
         // About
         ui.group(|ui| {
             ui.label("About");

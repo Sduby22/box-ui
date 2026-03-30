@@ -37,7 +37,10 @@ pub struct AppSettings {
     /// Whether to automatically start the kernel when the app launches.
     #[serde(default)]
     pub launch_core_on_start: bool,
-
+    /// Whether to release UI memory when the window is hidden (destroy/recreate window).
+    /// When false, the window is merely hidden for faster restore.
+    #[serde(default)]
+    pub release_memory_on_hide: bool,
 }
 
 fn default_max_log_lines() -> usize {
@@ -53,6 +56,7 @@ impl Default for AppSettings {
             max_log_lines: default_max_log_lines(),
             run_elevated: false,
             launch_core_on_start: false,
+            release_memory_on_hide: false,
         }
     }
 }
@@ -350,6 +354,17 @@ impl SettingsManager {
 
     pub fn set_launch_core_on_start(&mut self, enabled: bool) {
         self.settings.launch_core_on_start = enabled;
+        self.save();
+    }
+
+    // ── Memory management ──
+
+    pub fn release_memory_on_hide(&self) -> bool {
+        self.settings.release_memory_on_hide
+    }
+
+    pub fn set_release_memory_on_hide(&mut self, enabled: bool) {
+        self.settings.release_memory_on_hide = enabled;
         self.save();
     }
 }

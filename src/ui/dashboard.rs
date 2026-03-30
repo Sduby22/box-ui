@@ -499,13 +499,8 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
     // Sync polling state from async task
     app.dashboard_state.traffic_polling = app.dashboard_state.polling_flag.load(Ordering::Relaxed);
 
-    // Start traffic polling if core is running, window visible, and not already polling
-    if app.cached_is_running
-        && app
-            .window_visible
-            .load(std::sync::atomic::Ordering::Relaxed)
-        && !app.dashboard_state.traffic_polling
-    {
+    // Start traffic polling if core is running and not already polling
+    if app.cached_is_running && !app.dashboard_state.traffic_polling {
         start_traffic_polling(app);
     }
 }

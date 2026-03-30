@@ -217,11 +217,8 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
     // Sync streaming state from async task
     app.logs_state.streaming = app.logs_state.streaming_flag.load(Ordering::Relaxed);
 
-    // Start streaming if core is running, window visible, and not already streaming
-    if app.cached_is_running
-        && app.window_visible.load(Ordering::Relaxed)
-        && !app.logs_state.streaming
-    {
+    // Start streaming if core is running and not already streaming
+    if app.cached_is_running && !app.logs_state.streaming {
         start_log_streaming(app);
     }
 
