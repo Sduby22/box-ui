@@ -235,6 +235,38 @@ impl eframe::App for BoxApp {
             push_toast(&self.toasts, ToastKind::Error, error_msg);
         }
 
+        // Handle configs refreshed by the background auto-refresh task.
+        // Runs at app level so it works regardless of active tab or window visibility.
+        let refreshed: Vec<uuid::Uuid> = self
+            .dashboard_state
+            .refreshed_config_ids
+            .lock()
+            .unwrap()
+            .drain(..)
+            .collect();
+        if !refreshed.is_empty() {
+            let active_id = self.settings_manager.active_config_id();
+            let active_refreshed = refreshed.iter().any(|id| Some(*id) == active_id);
+            for id in &refreshed {
+                if let Some(config) = self.settings_manager.configs().iter().find(|c| c.id == *id) {
+                    push_toast(
+                        &self.toasts,
+                        ToastKind::Success,
+                        format!("Config \"{}\" refreshed", config.name),
+                    );
+                }
+            }
+            if active_refreshed {
+                self.refresh_clash_api_base();
+                ui::dashboard::restart_kernel_if_running(self);
+            }
+        }
+
+        // Start subscription auto-refresh task if not already running
+        if !self.dashboard_state.refresh_task_running.load(Ordering::Relaxed) {
+            ui::dashboard::start_config_refresh_task(self);
+        }
+
         // Request repaint for real-time updates
         ctx.request_repaint_after(std::time::Duration::from_secs(1));
 

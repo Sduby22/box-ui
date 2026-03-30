@@ -258,7 +258,13 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
                     app.refresh_clash_api_base();
                     restart_kernel_if_running(app);
                 }
-                Some(ConfigAction::Remove(id)) => app.settings_manager.remove_config(id),
+                Some(ConfigAction::Remove(id)) => {
+                    app.settings_manager.remove_config(id);
+                    // Signal the refresh task to restart without the removed config
+                    app.dashboard_state
+                        .refresh_task_running
+                        .store(false, Ordering::Relaxed);
+                }
                 None => {}
             }
         });
@@ -454,6 +460,10 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
                 pending.refresh_interval_minutes,
             );
         }
+        // Signal the refresh task to restart with the new config list
+        app.dashboard_state
+            .refresh_task_running
+            .store(false, Ordering::Relaxed);
         // Close the dialog and clear inputs on successful download
         app.dashboard_state.show_add_config_window = false;
         app.dashboard_state.add_config_name_input.clear();
@@ -461,37 +471,6 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
         app.dashboard_state.add_config_interval_input = "60".to_string();
     }
     drop(pending_configs);
-
-    // Handle configs refreshed by the background auto-refresh task
-    let refreshed: Vec<Uuid> = app
-        .dashboard_state
-        .refreshed_config_ids
-        .lock()
-        .unwrap()
-        .drain(..)
-        .collect();
-    if !refreshed.is_empty() {
-        let active_id = app.settings_manager.active_config_id();
-        let active_refreshed = refreshed.iter().any(|id| Some(*id) == active_id);
-        for id in &refreshed {
-            if let Some(config) = app.settings_manager.configs().iter().find(|c| c.id == *id) {
-                push_toast(
-                    &app.toasts,
-                    ToastKind::Success,
-                    format!("Config \"{}\" refreshed", config.name),
-                );
-            }
-        }
-        if active_refreshed {
-            app.refresh_clash_api_base();
-            restart_kernel_if_running(app);
-        }
-    }
-
-    // Start subscription auto-refresh task if not already running
-    if !app.dashboard_state.refresh_task_running.load(Ordering::Relaxed) {
-        start_config_refresh_task(app);
-    }
 
     // Modal windows
     show_releases_window(ui.ctx(), app);
@@ -892,6 +871,10 @@ fn show_edit_config_window(ctx: &egui::Context, app: &mut BoxApp) {
                             refresh_interval_minutes: interval,
                         };
                         app.settings_manager.update_config(id, name, source);
+                        // Signal the refresh task to restart with fresh config data
+                        app.dashboard_state
+                            .refresh_task_running
+                            .store(false, Ordering::Relaxed);
 
                         downloading_flag.store(true, Ordering::Relaxed);
                         app.runtime.spawn(async move {
@@ -1101,7 +1084,7 @@ pub fn start_traffic_polling(app: &mut BoxApp) {
 }
 
 /// Restart the kernel if it's currently running (e.g. after config switch or refresh).
-fn restart_kernel_if_running(app: &mut BoxApp) {
+pub fn restart_kernel_if_running(app: &mut BoxApp) {
     if !app.cached_is_running {
         return;
     }
@@ -1129,9 +1112,9 @@ fn restart_kernel_if_running(app: &mut BoxApp) {
     }
 }
 
-/// Spawn a background task that checks remote configs and refreshes any that are due.
-/// Runs one pass then exits so it picks up fresh config state on next invocation.
-fn start_config_refresh_task(app: &mut BoxApp) {
+/// Spawn a long-running background task that periodically checks remote configs
+/// and refreshes any that are due. Loops every 60 seconds while the flag is set.
+pub fn start_config_refresh_task(app: &mut BoxApp) {
     // Collect remote config info needed by the task
     let remote_configs: Vec<(Uuid, String, std::path::PathBuf, u32)> = app
         .settings_manager
@@ -1158,47 +1141,64 @@ fn start_config_refresh_task(app: &mut BoxApp) {
     running_flag.store(true, Ordering::Relaxed);
 
     app.runtime.spawn(async move {
-        // Wait 60 seconds before checking (avoid hammering on startup)
-        tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-
-        for &(id, ref url, ref path, interval_minutes) in &remote_configs {
-            if interval_minutes == 0 {
-                continue;
+        // Initial delay to avoid hammering on startup
+        for _ in 0..60 {
+            if !running_flag.load(Ordering::Relaxed) {
+                return;
             }
-
-            // Check file age — refresh if older than the interval
-            let needs_refresh = match std::fs::metadata(path).and_then(|m| m.modified()) {
-                Ok(modified) => {
-                    let elapsed = SystemTime::now()
-                        .duration_since(modified)
-                        .unwrap_or_default();
-                    elapsed.as_secs() >= u64::from(interval_minutes) * 60
-                }
-                Err(_) => true, // file missing, re-download
-            };
-
-            if !needs_refresh {
-                continue;
-            }
-
-            match download::fetch_remote_config(&client, url, path).await {
-                Ok(()) => {
-                    tracing::info!("Auto-refreshed config from {url}");
-                    refreshed_ids.lock().unwrap().push(id);
-                }
-                Err(e) => {
-                    tracing::warn!("Auto-refresh failed for {url}: {e}");
-                    push_toast(
-                        &toasts,
-                        ToastKind::Error,
-                        format!("Auto-refresh failed: {e}"),
-                    );
-                }
-            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         }
 
-        // Mark task as done so it restarts with fresh config state
-        running_flag.store(false, Ordering::Relaxed);
+        // Main loop: check configs every 60 seconds
+        loop {
+            if !running_flag.load(Ordering::Relaxed) {
+                return;
+            }
+
+            for &(id, ref url, ref path, interval_minutes) in &remote_configs {
+                if interval_minutes == 0 {
+                    continue;
+                }
+
+                // Check file age — refresh if older than the interval
+                let needs_refresh = match std::fs::metadata(path).and_then(|m| m.modified()) {
+                    Ok(modified) => {
+                        let elapsed = SystemTime::now()
+                            .duration_since(modified)
+                            .unwrap_or_default();
+                        elapsed.as_secs() >= u64::from(interval_minutes) * 60
+                    }
+                    Err(_) => true, // file missing, re-download
+                };
+
+                if !needs_refresh {
+                    continue;
+                }
+
+                match download::fetch_remote_config(&client, url, path).await {
+                    Ok(()) => {
+                        tracing::info!("Auto-refreshed config from {url}");
+                        refreshed_ids.lock().unwrap().push(id);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Auto-refresh failed for {url}: {e}");
+                        push_toast(
+                            &toasts,
+                            ToastKind::Error,
+                            format!("Auto-refresh failed: {e}"),
+                        );
+                    }
+                }
+            }
+
+            // Sleep 60s in 1-second chunks so the task can exit promptly when flagged
+            for _ in 0..60 {
+                if !running_flag.load(Ordering::Relaxed) {
+                    return;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            }
+        }
     });
 }
 
