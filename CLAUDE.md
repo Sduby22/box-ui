@@ -65,7 +65,7 @@ Left sidebar navigation + content area. Sidebar bottom always shows core status 
 - **Launch core on start**: optionally auto-start the sing-box core when the app launches
 - Platform-specific implementations:
   - **Linux**: XDG autostart (~/.config/autostart/*.desktop)
-  - **macOS**: LaunchAgent plist
+  - **macOS**: Login Items via System Events (osascript), with legacy LaunchAgent cleanup
   - **Windows**: Task Scheduler with `HighestAvailable` run level (when elevated), Startup folder .bat fallback (when not elevated)
 
 ### 5. System Tray

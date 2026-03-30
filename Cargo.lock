@@ -537,7 +537,7 @@ dependencies = [
 
 [[package]]
 name = "box-ui"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "dirs",
  "eframe",

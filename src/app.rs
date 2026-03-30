@@ -88,6 +88,8 @@ impl BoxApp {
 
         let max_log_lines = settings_manager.max_log_lines();
         let logs_state = ui::logs::LogsState::new(max_log_lines);
+        // Fix autostart if exe was moved since registration
+        crate::core::autostart::repair_if_needed();
         let settings_state = ui::settings::SettingsState::default();
         let toasts: Toasts = Arc::new(Mutex::new(VecDeque::new()));
 
@@ -180,9 +182,10 @@ impl eframe::App for BoxApp {
 
             // Always stop background streams to save CPU while hidden
             self.dashboard_state
+                .traffic
                 .polling_flag
                 .store(false, Ordering::Relaxed);
-            self.dashboard_state.traffic_polling = false;
+            self.dashboard_state.traffic.traffic_polling = false;
             self.connections_state
                 .streaming_flag
                 .store(false, Ordering::Relaxed);
@@ -192,7 +195,7 @@ impl eframe::App for BoxApp {
 
             if self.settings_manager.release_memory_on_hide() {
                 // Clear heavy application state to free memory while hidden.
-                self.dashboard_state.traffic_history.lock().unwrap().clear();
+                self.dashboard_state.traffic.traffic_history.lock().unwrap().clear();
                 self.connections_state.connections.lock().unwrap().clear();
                 self.connections_state.clear_speed_cache();
                 self.outbounds_state.groups.lock().unwrap().clear();
@@ -224,9 +227,9 @@ impl eframe::App for BoxApp {
         self.cached_is_running = self.kernel_manager.is_running();
 
         // Sync & start traffic polling globally (sidebar needs live speed data)
-        self.dashboard_state.traffic_polling =
-            self.dashboard_state.polling_flag.load(Ordering::Relaxed);
-        if self.cached_is_running && !self.dashboard_state.traffic_polling {
+        self.dashboard_state.traffic.traffic_polling =
+            self.dashboard_state.traffic.polling_flag.load(Ordering::Relaxed);
+        if self.cached_is_running && !self.dashboard_state.traffic.traffic_polling {
             ui::dashboard::start_traffic_polling(self);
         }
 
@@ -239,6 +242,7 @@ impl eframe::App for BoxApp {
         // Runs at app level so it works regardless of active tab or window visibility.
         let refreshed: Vec<uuid::Uuid> = self
             .dashboard_state
+            .config
             .refreshed_config_ids
             .lock()
             .unwrap()
@@ -263,7 +267,7 @@ impl eframe::App for BoxApp {
         }
 
         // Start subscription auto-refresh task if not already running
-        if !self.dashboard_state.refresh_task_running.load(Ordering::Relaxed) {
+        if !self.dashboard_state.config.refresh_task_running.load(Ordering::Relaxed) {
             ui::dashboard::start_config_refresh_task(self);
         }
 
