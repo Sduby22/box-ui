@@ -13,14 +13,6 @@ use std::sync::{Arc, Mutex};
 /// Used by both the window icon and the tray icon to avoid decoding twice.
 pub static APP_ICON_PNG: &[u8] = include_bytes!("../assets/icons/128.png");
 
-#[cfg(feature = "heap-profile")]
-#[global_allocator]
-static ALLOC: dhat::Alloc = dhat::Alloc;
-
-/// Global profiler handle so the tray quit handler can flush data before exit.
-#[cfg(feature = "heap-profile")]
-pub static HEAP_PROFILER: std::sync::Mutex<Option<dhat::Profiler>> = std::sync::Mutex::new(None);
-
 /// Shared state between the tray event thread and the eframe window.
 pub struct TrayState {
     /// egui context for the window (allows tray thread to show/focus it).
@@ -28,31 +20,6 @@ pub struct TrayState {
 }
 
 fn main() -> eframe::Result<()> {
-    // dhat records every heap allocation. The profiler is stored globally so
-    // the tray quit handler (which calls std::process::exit) can drop it first,
-    // ensuring dhat-heap.json is written to the data directory.
-    #[cfg(feature = "heap-profile")]
-    {
-        let output_path = dirs::data_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("box-ui")
-            .join("dhat-heap.json");
-        let profiler = dhat::Profiler::builder()
-            .file_name(output_path.clone())
-            .trim_backtraces(None)
-            .build();
-        *HEAP_PROFILER.lock().unwrap() = Some(profiler);
-        eprintln!("dhat: will write to {}", output_path.display());
-    }
-    #[cfg(feature = "profile")]
-    {
-        use tracing_subscriber::layer::SubscriberExt;
-        use tracing_subscriber::util::SubscriberInitExt;
-        tracing_subscriber::registry()
-            .with(tracing_tracy::TracyLayer::default())
-            .init();
-    }
-    #[cfg(not(feature = "profile"))]
     tracing_subscriber::fmt::init();
 
     core::platform::setup_child_process_cleanup();
@@ -163,10 +130,6 @@ fn main() -> eframe::Result<()> {
                         }
                     } else if event.id() == &quit_id {
                         core::kernel::shutdown_backend(&backend);
-                        #[cfg(feature = "heap-profile")]
-                        {
-                            let _ = crate::HEAP_PROFILER.lock().unwrap().take();
-                        }
                         std::process::exit(0);
                     }
                 }

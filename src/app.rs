@@ -203,14 +203,19 @@ impl eframe::App for BoxApp {
                 // Clear egui's internal layout/paint caches.
                 ctx.memory_mut(|m| *m = Default::default());
 
-                // On Windows, freed Rust memory stays in the process working set
-                // until the OS decides to reclaim it. Explicitly trim the working
-                // set so Task Manager reflects the reduction immediately.
+                // Platform-specific: return freed memory to the OS immediately.
                 #[cfg(target_os = "windows")]
                 {
+                    // Evict all pages from the working set; accessed pages will
+                    // soft-fault back in on demand.
                     use windows_sys::Win32::System::ProcessStatus::EmptyWorkingSet;
                     use windows_sys::Win32::System::Threading::GetCurrentProcess;
                     unsafe { EmptyWorkingSet(GetCurrentProcess()); }
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    // glibc: release free heap pages back to the kernel.
+                    unsafe { libc::malloc_trim(0); }
                 }
             }
         }
