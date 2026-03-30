@@ -76,6 +76,9 @@ pub struct ConnectionsState {
     pub connections: Arc<Mutex<Vec<Connection>>>,
     pub streaming: bool,
     pub streaming_flag: Arc<AtomicBool>,
+    /// Handle to the streaming task; aborted before starting a new one
+    /// to prevent duplicate streams after window hide/show cycles.
+    pub streaming_handle: Option<tokio::task::JoinHandle<()>>,
     pub sort_column: Option<SortColumn>,
     pub sort_order: SortOrder,
     pub search_query: String,
@@ -95,6 +98,7 @@ impl Default for ConnectionsState {
             connections: Arc::new(Mutex::new(Vec::new())),
             streaming: false,
             streaming_flag: Arc::new(AtomicBool::new(false)),
+            streaming_handle: None,
             sort_column: None,
             sort_order: SortOrder::Ascending,
             search_query: String::new(),
@@ -393,6 +397,11 @@ fn chain_str(conn: &Connection) -> std::borrow::Cow<'_, str> {
 }
 
 fn start_connections_streaming(app: &mut BoxApp) {
+    // Abort any previous task to prevent duplicate streams
+    if let Some(h) = app.connections_state.streaming_handle.take() {
+        h.abort();
+    }
+
     app.connections_state.streaming = true;
     let connections = app.connections_state.connections.clone();
     let streaming_flag = app.connections_state.streaming_flag.clone();
@@ -401,7 +410,7 @@ fn start_connections_streaming(app: &mut BoxApp) {
 
     streaming_flag.store(true, Ordering::Relaxed);
 
-    app.runtime.spawn(async move {
+    let handle = app.runtime.spawn(async move {
         let mut ws_url = format!(
             "{}/connections",
             base_url.replacen("http", "ws", 1)
@@ -442,6 +451,7 @@ fn start_connections_streaming(app: &mut BoxApp) {
         connections.lock().unwrap().clear();
         streaming_flag.store(false, Ordering::Relaxed);
     });
+    app.connections_state.streaming_handle = Some(handle);
 }
 
 fn format_bytes(bytes: u64) -> String {

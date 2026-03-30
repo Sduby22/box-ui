@@ -189,6 +189,9 @@ pub struct LogsState {
     pub search_query: String,
     pub streaming: bool,
     pub streaming_flag: Arc<AtomicBool>,
+    /// Handle to the streaming task; aborted before starting a new one
+    /// to prevent duplicate streams after window hide/show cycles.
+    pub streaming_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl LogsState {
@@ -200,6 +203,7 @@ impl LogsState {
             search_query: String::new(),
             streaming: false,
             streaming_flag: Arc::new(AtomicBool::new(false)),
+            streaming_handle: None,
         }
     }
 }
@@ -284,6 +288,11 @@ fn start_log_streaming(app: &mut BoxApp) {
         return;
     }
 
+    // Abort any previous task to prevent duplicate streams
+    if let Some(h) = app.logs_state.streaming_handle.take() {
+        h.abort();
+    }
+
     app.logs_state.streaming = true;
     let entries = app.logs_state.entries.clone();
     let streaming_flag = app.logs_state.streaming_flag.clone();
@@ -292,7 +301,7 @@ fn start_log_streaming(app: &mut BoxApp) {
 
     streaming_flag.store(true, Ordering::Relaxed);
 
-    app.runtime.spawn(async move {
+    let handle = app.runtime.spawn(async move {
         // Subscribe to all levels (debug captures everything)
         let mut ws_url = format!("{}/logs", base_url.replacen("http", "ws", 1));
         let mut params = vec!["level=debug".to_string()];
@@ -343,6 +352,7 @@ fn start_log_streaming(app: &mut BoxApp) {
 
         streaming_flag.store(false, Ordering::Relaxed);
     });
+    app.logs_state.streaming_handle = Some(handle);
 }
 
 /// Case-insensitive ASCII substring search without heap allocation.

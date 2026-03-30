@@ -42,6 +42,9 @@ pub struct DashboardState {
     pub traffic_polling: bool,
     /// Shared with async task so it can signal when the stream ends
     pub polling_flag: Arc<AtomicBool>,
+    /// Handle to the traffic polling task; aborted before starting a new one
+    /// to prevent duplicate streams after window hide/show cycles.
+    pub polling_handle: Option<tokio::task::JoinHandle<()>>,
     /// Releases fetched from GitHub
     pub releases: Arc<Mutex<Vec<download::Release>>>,
     /// Download progress: 0 = idle, 1..=1000 = permille progress
@@ -90,6 +93,7 @@ impl Default for DashboardState {
             traffic_history: Arc::new(Mutex::new(VecDeque::with_capacity(MAX_TRAFFIC_POINTS))),
             traffic_polling: false,
             polling_flag: Arc::new(AtomicBool::new(false)),
+            polling_handle: None,
             releases: Arc::new(Mutex::new(Vec::new())),
             download_progress: Arc::new(AtomicU32::new(0)),
             show_releases_window: false,
@@ -1027,6 +1031,11 @@ fn delete_kernel(app: &mut BoxApp, tag: &str) {
 }
 
 pub fn start_traffic_polling(app: &mut BoxApp) {
+    // Abort any previous task to prevent duplicate streams
+    if let Some(h) = app.dashboard_state.polling_handle.take() {
+        h.abort();
+    }
+
     app.dashboard_state.traffic_polling = true;
     let history = app.dashboard_state.traffic_history.clone();
     let polling_flag = app.dashboard_state.polling_flag.clone();
@@ -1036,7 +1045,7 @@ pub fn start_traffic_polling(app: &mut BoxApp) {
     polling_flag.store(true, Ordering::Relaxed);
     history.lock().unwrap().clear();
 
-    app.runtime.spawn(async move {
+    let handle = app.runtime.spawn(async move {
         let mut ws_url = format!("{}/traffic", base_url.replacen("http", "ws", 1));
         if !secret.is_empty() {
             ws_url.push_str(&format!("?token={secret}"));
@@ -1081,6 +1090,7 @@ pub fn start_traffic_polling(app: &mut BoxApp) {
 
         polling_flag.store(false, Ordering::Relaxed);
     });
+    app.dashboard_state.polling_handle = Some(handle);
 }
 
 /// Restart the kernel if it's currently running (e.g. after config switch or refresh).
