@@ -10,6 +10,9 @@ pub const DEFAULT_MAX_LOG_LINES: usize = 10_000;
 pub struct LogEntry {
     pub level: LogLevel,
     pub payload: String,
+    /// Pre-formatted display text: "[LEVEL] payload" — built once on creation to avoid
+    /// per-frame `format!()` allocations in the UI loop.
+    pub formatted: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -50,8 +53,10 @@ impl LogLevel {
 }
 
 /// Fixed-capacity ring buffer that overwrites the oldest entries when full.
+/// The internal buffer is lazily allocated on first push to avoid upfront memory cost.
 pub struct LogRingBuffer {
     buf: Vec<Option<LogEntry>>,
+    capacity: usize,
     /// Next write position.
     head: usize,
     /// Number of entries currently stored.
@@ -61,19 +66,29 @@ pub struct LogRingBuffer {
 impl LogRingBuffer {
     pub fn new(capacity: usize) -> Self {
         let capacity = capacity.max(1);
-        let mut buf = Vec::with_capacity(capacity);
-        buf.resize_with(capacity, || None);
+        // Defer allocation until first push
         Self {
-            buf,
+            buf: Vec::new(),
+            capacity,
             head: 0,
             len: 0,
         }
     }
 
+    /// Ensure internal buffer is allocated to full capacity.
+    fn ensure_allocated(&mut self) {
+        if self.buf.len() < self.capacity {
+            self.buf.clear();
+            self.buf.reserve_exact(self.capacity);
+            self.buf.resize_with(self.capacity, || None);
+        }
+    }
+
     pub fn push(&mut self, entry: LogEntry) {
+        self.ensure_allocated();
         self.buf[self.head] = Some(entry);
-        self.head = (self.head + 1) % self.buf.len();
-        if self.len < self.buf.len() {
+        self.head = (self.head + 1) % self.capacity;
+        if self.len < self.capacity {
             self.len += 1;
         }
     }
@@ -88,7 +103,14 @@ impl LogRingBuffer {
 
     /// Iterate entries from oldest to newest.
     pub fn iter(&self) -> RingIter<'_> {
-        let start = if self.len < self.buf.len() {
+        if self.buf.is_empty() || self.len == 0 {
+            return RingIter {
+                buf: &self.buf,
+                pos: 0,
+                remaining: 0,
+            };
+        }
+        let start = if self.len < self.capacity {
             0
         } else {
             self.head
@@ -103,7 +125,13 @@ impl LogRingBuffer {
     /// Resize the buffer. If shrinking, keeps the newest entries.
     pub fn resize(&mut self, new_capacity: usize) {
         let new_capacity = new_capacity.max(1);
-        if new_capacity == self.buf.len() {
+        if new_capacity == self.capacity {
+            return;
+        }
+
+        if self.buf.is_empty() {
+            // Not yet allocated, just update capacity
+            self.capacity = new_capacity;
             return;
         }
 
@@ -114,14 +142,15 @@ impl LogRingBuffer {
         let keep = self.len.min(new_capacity);
         let skip = self.len - keep;
         for (i, entry) in self.iter().skip(skip).enumerate() {
-            // SAFETY: entry is guaranteed Some since iter only yields `len` items
             new_buf[i] = Some(LogEntry {
                 level: entry.level,
                 payload: entry.payload.clone(),
+                formatted: entry.formatted.clone(),
             });
         }
 
         self.buf = new_buf;
+        self.capacity = new_capacity;
         self.head = keep % new_capacity;
         self.len = keep;
     }
@@ -244,7 +273,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
             if has_filter && !entry.payload.to_lowercase().contains(&query) {
                 continue;
             }
-            let text = egui::RichText::new(format!("[{}] {}", entry.level.label(), entry.payload))
+            let text = egui::RichText::new(&entry.formatted)
                 .monospace()
                 .color(entry.level.color());
             ui.label(text);
@@ -294,9 +323,12 @@ fn start_log_streaming(app: &mut BoxApp) {
                     if let Ok(log) = serde_json::from_str::<serde_json::Value>(&text) {
                         let level_str = log["type"].as_str().unwrap_or("info");
                         let payload = log["payload"].as_str().unwrap_or("").to_string();
+                        let level = LogLevel::from_str(level_str);
+                        let formatted = format!("[{}] {}", level.label(), payload);
                         let entry = LogEntry {
-                            level: LogLevel::from_str(level_str),
+                            level,
                             payload,
+                            formatted,
                         };
 
                         entries.lock().unwrap().push(entry);

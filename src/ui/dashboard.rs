@@ -160,17 +160,8 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
             .include_x(MAX_TRAFFIC_POINTS as f64)
             .y_axis_formatter(|mark, _range| format_speed_axis(mark.value))
             .label_formatter(move |_name, value| {
-                // Find the closest point by time (x axis)
-                let closest = history_snapshot
-                    .iter()
-                    .enumerate()
-                    .min_by(|(ia, _), (ib, _)| {
-                        ((*ia as f64) - value.x)
-                            .abs()
-                            .partial_cmp(&((*ib as f64) - value.x).abs())
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    });
-                if let Some((_, p)) = closest {
+                let idx = value.x.round() as usize;
+                if let Some(p) = history_snapshot.get(idx) {
                     format!(
                         "↑ {}\n↓ {}",
                         crate::core::format_speed(p.upload),

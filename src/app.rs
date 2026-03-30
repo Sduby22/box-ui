@@ -138,14 +138,10 @@ impl BoxApp {
         let show_id = show_item.id().clone();
         let quit_id = quit_item.id().clone();
 
-        // Decode the app icon PNG and resize for tray use
-        let tray_icon_image = image::load_from_memory(include_bytes!("../assets/icons/1024.png"))
+        // Reuse the shared 128x128 PNG for the tray icon (already small enough).
+        let icon_data = eframe::icon_data::from_png_bytes(crate::APP_ICON_PNG)
             .expect("failed to decode tray icon PNG");
-        let tray_size = 32u32;
-        let resized =
-            tray_icon_image.resize_exact(tray_size, tray_size, image::imageops::FilterType::Lanczos3);
-        let rgba = resized.into_rgba8().into_raw();
-        let icon = tray_icon::Icon::from_rgba(rgba, tray_size, tray_size)
+        let icon = tray_icon::Icon::from_rgba(icon_data.rgba, icon_data.width, icon_data.height)
             .expect("failed to create tray icon");
 
         let tray_icon = TrayIconBuilder::new()
@@ -174,6 +170,11 @@ impl BoxApp {
                             ctx.request_repaint();
                         } else if event.id() == &quit_id {
                             shutdown_backend(&backend_for_tray);
+                            // Flush heap profiler before exit (exit skips Drop)
+                            #[cfg(feature = "heap-profile")]
+                            {
+                                let _ = crate::HEAP_PROFILER.lock().unwrap().take();
+                            }
                             std::process::exit(0);
                         }
                     }
