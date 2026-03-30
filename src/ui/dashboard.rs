@@ -498,13 +498,6 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
     show_add_config_window(ui.ctx(), app);
     show_edit_config_window(ui.ctx(), app);
 
-    // Sync polling state from async task
-    app.dashboard_state.traffic_polling = app.dashboard_state.polling_flag.load(Ordering::Relaxed);
-
-    // Start traffic polling if core is running and not already polling
-    if app.cached_is_running && !app.dashboard_state.traffic_polling {
-        start_traffic_polling(app);
-    }
 }
 
 enum ConfigAction {
@@ -1050,7 +1043,7 @@ fn delete_kernel(app: &mut BoxApp, tag: &str) {
     );
 }
 
-fn start_traffic_polling(app: &mut BoxApp) {
+pub fn start_traffic_polling(app: &mut BoxApp) {
     app.dashboard_state.traffic_polling = true;
     let history = app.dashboard_state.traffic_history.clone();
     let polling_flag = app.dashboard_state.polling_flag.clone();

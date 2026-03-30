@@ -218,6 +218,13 @@ impl eframe::App for BoxApp {
         // Cache is_running once per frame (avoids repeated Mutex lock + try_wait syscall)
         self.cached_is_running = self.kernel_manager.is_running();
 
+        // Sync & start traffic polling globally (sidebar needs live speed data)
+        self.dashboard_state.traffic_polling =
+            self.dashboard_state.polling_flag.load(Ordering::Relaxed);
+        if self.cached_is_running && !self.dashboard_state.traffic_polling {
+            ui::dashboard::start_traffic_polling(self);
+        }
+
         // Show error toast if the kernel exited unexpectedly
         if let Some(error_msg) = self.kernel_manager.take_unexpected_exit() {
             push_toast(&self.toasts, ToastKind::Error, error_msg);
