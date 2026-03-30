@@ -71,33 +71,6 @@ pub struct BoxApp {
 
 impl BoxApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // Load CJK font for Chinese/Japanese/Korean character support
-        let cjk_font_paths: &[&str] = &[
-            "/System/Library/Fonts/PingFang.ttc",
-            "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-            "C:\\Windows\\Fonts\\msyh.ttc",
-        ];
-        for path in cjk_font_paths {
-            if let Ok(font_data) = std::fs::read(path) {
-                let mut fonts = egui::FontDefinitions::default();
-                fonts.font_data.insert(
-                    "cjk".to_owned(),
-                    Arc::new(egui::FontData::from_owned(font_data)),
-                );
-                if let Some(list) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-                    list.push("cjk".to_owned());
-                }
-                if let Some(list) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
-                    list.push("cjk".to_owned());
-                }
-                cc.egui_ctx.set_fonts(fonts);
-                break;
-            }
-        }
-
         let runtime = tokio::runtime::Handle::current();
         let data_dir = dirs::data_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -105,6 +78,8 @@ impl BoxApp {
         std::fs::create_dir_all(&data_dir).ok();
 
         let settings_manager = SettingsManager::new(data_dir);
+
+        crate::fonts::setup_fonts(&cc.egui_ctx);
 
         let kernel_path = settings_manager.active_kernel_path();
         let (clash_api_base, clash_api_secret) = {
@@ -120,29 +95,21 @@ impl BoxApp {
 
         let toasts: Toasts = Arc::new(Mutex::new(VecDeque::new()));
 
-        // Create KernelManager first — its stale-helper check must run BEFORE
-        // ensure_running() so we can detect another GUI instance's helper.
         let mut kernel_manager = KernelManager::new(kernel_path);
 
-        // Now ensure helper daemon is running and up-to-date (self-upgrades via IPC, no password)
-        if crate::core::helper_install::is_installed() {
-            match crate::core::helper_client::HelperClient::ensure_running() {
-                Ok(version) => {
-                    push_toast(
-                        &toasts,
-                        ToastKind::Success,
-                        format!("Helper daemon connected (v{version})"),
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to ensure helper daemon: {e}");
-                    push_toast(
-                        &toasts,
-                        ToastKind::Error,
-                        format!("Helper daemon error: {e}"),
-                    );
-                }
-            }
+        // Auto-elevate: if both launch-core-on-start and run-as-admin are enabled
+        // but the process is not elevated, relaunch immediately with admin privileges.
+        #[cfg(target_os = "windows")]
+        if settings_manager.launch_core_on_start()
+            && settings_manager.run_elevated()
+            && !crate::core::permissions::is_elevated()
+            && let Err(e) = crate::core::permissions::relaunch_elevated()
+        {
+            push_toast(
+                &toasts,
+                ToastKind::Error,
+                format!("Failed to relaunch as admin: {e}"),
+            );
         }
 
         // Auto-start kernel if configured
@@ -171,16 +138,14 @@ impl BoxApp {
         let show_id = show_item.id().clone();
         let quit_id = quit_item.id().clone();
 
-        // 22x22 solid icon (appropriate for macOS menu bar)
-        let icon_size = 22u32;
-        let mut rgba = vec![0u8; (icon_size * icon_size * 4) as usize];
-        for pixel in rgba.chunks_exact_mut(4) {
-            pixel[0] = 66;
-            pixel[1] = 133;
-            pixel[2] = 244;
-            pixel[3] = 255;
-        }
-        let icon = tray_icon::Icon::from_rgba(rgba, icon_size, icon_size)
+        // Decode the app icon PNG and resize for tray use
+        let tray_icon_image = image::load_from_memory(include_bytes!("../assets/icons/1024.png"))
+            .expect("failed to decode tray icon PNG");
+        let tray_size = 32u32;
+        let resized =
+            tray_icon_image.resize_exact(tray_size, tray_size, image::imageops::FilterType::Lanczos3);
+        let rgba = resized.into_rgba8().into_raw();
+        let icon = tray_icon::Icon::from_rgba(rgba, tray_size, tray_size)
             .expect("failed to create tray icon");
 
         let tray_icon = TrayIconBuilder::new()
@@ -317,6 +282,11 @@ impl eframe::App for BoxApp {
 
         // Cache is_running once per frame (avoids repeated Mutex lock + try_wait syscall)
         self.cached_is_running = self.kernel_manager.is_running();
+
+        // Show error toast if the kernel exited unexpectedly
+        if let Some(error_msg) = self.kernel_manager.take_unexpected_exit() {
+            push_toast(&self.toasts, ToastKind::Error, error_msg);
+        }
 
         // Request repaint for real-time updates
         ctx.request_repaint_after(std::time::Duration::from_secs(1));

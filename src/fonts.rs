@@ -1,0 +1,47 @@
+use eframe::egui;
+use std::sync::Arc;
+
+const DM_MONO: &[u8] = include_bytes!("../assets/fonts/DMMono-Regular.ttf");
+
+pub fn setup_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+
+    // DM Mono as primary font
+    fonts.font_data.insert(
+        "dm_mono".to_owned(),
+        Arc::new(egui::FontData::from_owned(DM_MONO.to_vec())),
+    );
+    if let Some(list) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+        list.insert(0, "dm_mono".to_owned());
+    }
+    if let Some(list) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+        list.insert(0, "dm_mono".to_owned());
+    }
+
+    // CJK fallback
+    let cjk_font_paths: &[&str] = &[
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "C:\\Windows\\Fonts\\msyh.ttc",
+    ];
+    for path in cjk_font_paths {
+        if let Ok(font_data) = std::fs::read(path) {
+            fonts.font_data.insert(
+                "cjk".to_owned(),
+                Arc::new(egui::FontData::from_owned(font_data)),
+            );
+            if let Some(list) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+                list.push("cjk".to_owned());
+            }
+            if let Some(list) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+                list.push("cjk".to_owned());
+            }
+            break;
+        }
+    }
+
+    ctx.set_fonts(fonts);
+}

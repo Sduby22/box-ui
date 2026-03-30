@@ -285,16 +285,19 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
                     .to_string();
                 let prev_selected = selected.clone();
                 let available_width = ui.available_width() - 90.0; // reserve space for "+ Download" button
+                fn strip_exe(name: &str) -> &str {
+                    name.strip_suffix(".exe").unwrap_or(name)
+                }
                 egui::ComboBox::from_id_salt("kernel_version")
                     .selected_text(if selected.is_empty() {
                         "None"
                     } else {
-                        &selected
+                        strip_exe(&selected)
                     })
                     .width(available_width.max(100.0))
                     .show_ui(ui, |ui| {
                         for name in &kernel_names {
-                            ui.selectable_value(&mut selected, name.clone(), name);
+                            ui.selectable_value(&mut selected, name.clone(), strip_exe(name));
                         }
                     });
                 if selected != prev_selected {
@@ -402,33 +405,30 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
                 app.settings_manager.set_run_elevated(run_elevated);
             }
 
-            // Show helper install prompt when elevated mode is on
             if run_elevated {
-                let installed = crate::core::helper_install::is_installed();
-                if !installed {
-                    ui.horizontal(|ui| {
-                        ui.weak("Helper not installed.");
-                        if ui.small_button("Install Helper").clicked() {
-                            match crate::core::helper_install::install_helper() {
-                                Ok(()) => {
-                                    push_toast(
-                                        &app.toasts,
-                                        ToastKind::Success,
-                                        "Helper daemon installed successfully".to_string(),
-                                    );
-                                }
-                                Err(e) => {
-                                    push_toast(
-                                        &app.toasts,
-                                        ToastKind::Error,
-                                        format!("Helper install failed: {e}"),
-                                    );
-                                }
-                            }
-                        }
-                    });
+                if crate::core::permissions::has_kernel_permissions(
+                    app.settings_manager.active_kernel_path().as_deref().unwrap_or(std::path::Path::new("")),
+                ) {
+                    ui.weak("No password needed");
                 } else {
-                    ui.weak("Helper installed (no password needed)");
+                    #[cfg(target_os = "windows")]
+                    if !crate::core::permissions::is_elevated() {
+                        ui.horizontal(|ui| {
+                            ui.weak("Not elevated.");
+                            if ui.small_button("Relaunch as Admin").clicked()
+                                && let Err(e) = crate::core::permissions::relaunch_elevated()
+                            {
+                                push_toast(
+                                    &app.toasts,
+                                    ToastKind::Error,
+                                    format!("Relaunch failed: {e}"),
+                                );
+                            }
+                        });
+                    }
+
+                    #[cfg(unix)]
+                    ui.weak("Will prompt for password on first start");
                 }
             }
         });
@@ -1036,8 +1036,13 @@ fn download_and_install_kernel(app: &mut BoxApp, url: &str, tag: &str, asset_nam
 }
 
 fn delete_kernel(app: &mut BoxApp, tag: &str) {
-    // tag is also the filename in kernels_dir
-    let is_active = app.settings_manager.active_kernel_name() == Some(tag);
+    // Resolve the actual filename: on Windows kernels have a `.exe` suffix.
+    let filename = if cfg!(target_os = "windows") {
+        format!("{tag}.exe")
+    } else {
+        tag.to_string()
+    };
+    let is_active = app.settings_manager.active_kernel_name() == Some(&filename);
     if is_active && app.cached_is_running {
         push_toast(
             &app.toasts,
@@ -1046,7 +1051,7 @@ fn delete_kernel(app: &mut BoxApp, tag: &str) {
         );
         return;
     }
-    app.settings_manager.remove_kernel(tag);
+    app.settings_manager.remove_kernel(&filename);
     if is_active {
         app.kernel_manager.set_kernel_path(None);
     }

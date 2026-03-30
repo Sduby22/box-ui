@@ -1,8 +1,8 @@
 pub mod autostart;
 pub mod download;
-pub mod helper_client;
-pub mod helper_install;
 pub mod kernel;
+pub mod permissions;
+pub mod platform;
 pub mod settings;
 
 pub fn format_speed(bytes_per_sec: f64) -> String {

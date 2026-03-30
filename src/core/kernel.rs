@@ -2,53 +2,22 @@ use std::path::PathBuf;
 use std::process::Child;
 use std::sync::{Arc, Mutex};
 
-/// Tracks how the kernel process is being managed.
-pub(crate) enum KernelBackend {
-    /// GUI directly owns the child process.
-    Direct(Child),
-    /// A macOS helper daemon manages the process.
-    HelperManaged,
-}
-
 pub struct KernelManager {
     kernel_path: Option<PathBuf>,
-    pub(crate) backend: Arc<Mutex<Option<KernelBackend>>>,
+    pub(crate) backend: Arc<Mutex<Option<Child>>>,
+    /// Stores an error message when the kernel exits unexpectedly.
+    last_unexpected_exit: Mutex<Option<String>>,
+    /// Captured stderr handle (only for elevated wrapper processes).
+    stderr: Mutex<Option<std::process::ChildStderr>>,
 }
 
 impl KernelManager {
     pub fn new(kernel_path: Option<PathBuf>) -> Self {
-        let mgr = Self {
+        Self {
             kernel_path,
             backend: Arc::new(Mutex::new(None)),
-        };
-        mgr.check_no_stale_helper();
-        mgr
-    }
-
-    /// On startup, verify no helper daemon is already bound to another GUI process.
-    /// Must be called BEFORE `ensure_running()` — at this point any live helper
-    /// must belong to a previous/concurrent GUI instance.
-    fn check_no_stale_helper(&self) {
-        if !super::helper_install::is_installed() {
-            return;
-        }
-        if let Ok(mut client) = super::helper_client::HelperClient::connect() {
-            // Try to bind our PID. If it succeeds, the helper was either unbound
-            // (orphaned) or already ours — both are fine. If it fails, another
-            // GUI instance owns it.
-            let pid = std::process::id();
-            if let Err(e) = client.bind(pid) {
-                tracing::error!("Helper daemon is bound to another GUI process: {e}");
-                rfd::MessageDialog::new()
-                    .set_level(rfd::MessageLevel::Error)
-                    .set_title("Box UI")
-                    .set_description(
-                        "A helper daemon is already running and bound to another Box UI instance.\n\
-                         Please close the other instance first, or wait for the helper to exit.",
-                    )
-                    .show();
-                std::process::exit(1);
-            }
+            last_unexpected_exit: Mutex::new(None),
+            stderr: Mutex::new(None),
         }
     }
 
@@ -72,72 +41,64 @@ impl KernelManager {
             .ok_or("No kernel binary configured")?
             .clone();
 
-        // When elevated and helper is installed, use helper daemon (all platforms)
-        if elevated && super::helper_install::is_installed() {
-            return self.start_via_helper(&kernel_path, config_path, working_dir);
+        // On first elevated start, try to grant persistent permissions (setuid / elevation)
+        // so subsequent starts don't need a password prompt.
+        if elevated && !super::permissions::has_kernel_permissions(&kernel_path) {
+            super::permissions::grant_kernel_permissions(&kernel_path)?;
         }
 
-        let mut cmd = if elevated {
+        let needs_elevation_wrapper = elevated && !super::permissions::has_kernel_permissions(&kernel_path);
+
+        let mut cmd = if needs_elevation_wrapper {
             build_elevated_command(&kernel_path, config_path, working_dir)?
         } else {
             let mut c = std::process::Command::new(&kernel_path);
             c.arg("run").arg("-c").arg(config_path).current_dir(working_dir);
+            #[cfg(target_os = "windows")]
+            {
+                use std::os::windows::process::CommandExt;
+                c.creation_flags(0x08000000); // CREATE_NO_WINDOW
+            }
             c
         };
 
-        let child = cmd
+        // Pipe stderr for elevated wrapper processes (short-lived, safe to buffer).
+        // For non-elevated direct starts, discard stderr to avoid pipe buffer filling
+        // up from a long-running kernel.
+        let stderr_mode = if needs_elevation_wrapper {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        };
+
+        let mut child = cmd
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stderr(stderr_mode)
             .spawn()
             .map_err(|e| format!("Failed to start kernel: {e}"))?;
 
-        *self.backend.lock().unwrap() = Some(KernelBackend::Direct(child));
-        Ok(())
-    }
-
-    fn start_via_helper(
-        &mut self,
-        kernel_path: &std::path::Path,
-        config_path: &std::path::Path,
-        working_dir: &std::path::Path,
-    ) -> Result<(), String> {
-        use super::helper_client::HelperClient;
-
-        HelperClient::ensure_running()?;
-
-        let mut client = HelperClient::connect()
-            .map_err(|e| format!("Failed to connect to helper: {e}"))?;
-
-        client.start(kernel_path, config_path, working_dir)?;
-
-        *self.backend.lock().unwrap() = Some(KernelBackend::HelperManaged);
+        *self.stderr.lock().unwrap() = if needs_elevation_wrapper {
+            child.stderr.take()
+        } else {
+            None
+        };
+        *self.backend.lock().unwrap() = Some(child);
+        *self.last_unexpected_exit.lock().unwrap() = None;
         Ok(())
     }
 
     pub fn stop(&mut self) -> Result<(), String> {
         let mut backend = self.backend.lock().unwrap();
         match backend.take() {
-            Some(KernelBackend::Direct(mut child)) => {
+            Some(mut child) => {
                 child
                     .kill()
                     .map_err(|e| format!("Failed to stop kernel: {e}"))?;
                 child.wait().ok();
                 Ok(())
             }
-            Some(KernelBackend::HelperManaged) => {
-                drop(backend); // Release lock before network call
-                self.stop_via_helper()
-            }
             None => Err("Kernel is not running".to_string()),
         }
-    }
-
-    fn stop_via_helper(&mut self) -> Result<(), String> {
-        use super::helper_client::HelperClient;
-        let mut client = HelperClient::connect()?;
-        client.stop()?;
-        *self.backend.lock().unwrap() = None;
-        Ok(())
     }
 
     pub fn restart(
@@ -152,71 +113,50 @@ impl KernelManager {
 
     pub fn is_running(&self) -> bool {
         let mut backend = self.backend.lock().unwrap();
-        match &mut *backend {
-            Some(KernelBackend::Direct(child)) => match child.try_wait() {
-                Ok(Some(_)) => {
+        if let Some(child) = &mut *backend {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let mut error_msg = format!("Kernel exited unexpectedly ({status})");
+                    if let Some(mut err) = self.stderr.lock().unwrap().take() {
+                        use std::io::Read;
+                        let mut buf = vec![0u8; 4096];
+                        if let Ok(n) = err.read(&mut buf) {
+                            let text = String::from_utf8_lossy(&buf[..n]).trim().to_string();
+                            if !text.is_empty() {
+                                error_msg = format!("{error_msg}: {text}");
+                            }
+                        }
+                    }
+                    *self.last_unexpected_exit.lock().unwrap() = Some(error_msg);
                     *backend = None;
                     false
                 }
                 Ok(None) => true,
                 Err(_) => false,
-            },
-            Some(KernelBackend::HelperManaged) => {
-                // Check via helper client (non-blocking attempt)
-                drop(backend); // Release lock before network call
-                self.check_helper_status()
             }
-            None => false,
+        } else {
+            false
         }
     }
 
-    fn check_helper_status(&self) -> bool {
-        use super::helper_client::HelperClient;
-        match HelperClient::connect() {
-            Ok(mut client) => match client.status() {
-                Ok((running, _)) => {
-                    if !running {
-                        *self.backend.lock().unwrap() = None;
-                    }
-                    running
-                }
-                Err(_) => {
-                    *self.backend.lock().unwrap() = None;
-                    false
-                }
-            },
-            Err(_) => {
-                *self.backend.lock().unwrap() = None;
-                false
-            }
-        }
+    /// Drain the last unexpected exit error, if any.
+    /// Called per frame by the UI to show error toasts.
+    pub fn take_unexpected_exit(&self) -> Option<String> {
+        self.last_unexpected_exit.lock().unwrap().take()
     }
 }
 
-/// Stop kernel and shut down helper given only the shared backend Arc.
-/// Used by both `KernelManager::shutdown_cleanup` and the tray quit handler.
-pub fn shutdown_backend(backend: &Arc<Mutex<Option<KernelBackend>>>) {
-    match backend.lock().unwrap().take() {
-        Some(KernelBackend::Direct(mut child)) => {
-            child.kill().ok();
-            child.wait().ok();
-        }
-        Some(KernelBackend::HelperManaged) => {
-            if let Ok(mut client) = super::helper_client::HelperClient::connect() {
-                client.stop().ok();
-                client.shutdown().ok();
-            }
-        }
-        None => {
-            if let Ok(mut client) = super::helper_client::HelperClient::connect() {
-                client.shutdown().ok();
-            }
-        }
+/// Stop kernel given only the shared backend Arc.
+/// Used by the tray quit handler.
+pub fn shutdown_backend(backend: &Arc<Mutex<Option<Child>>>) {
+    if let Some(mut child) = backend.lock().unwrap().take() {
+        child.kill().ok();
+        child.wait().ok();
     }
 }
 
 /// Build a `Command` that runs the kernel binary with elevated (root/admin) privileges.
-/// Used as fallback when the helper daemon is not installed.
+/// Used as fallback when the kernel binary does not have setuid (macOS/Linux only).
 fn build_elevated_command(
     kernel_path: &std::path::Path,
     config_path: &std::path::Path,
@@ -262,19 +202,15 @@ fn build_elevated_command(
 
     #[cfg(target_os = "windows")]
     {
-        let script = format!(
-            "Start-Process -FilePath '{}' -ArgumentList 'run','-c','{}' -Verb RunAs -Wait -NoNewWindow -WorkingDirectory '{}'",
-            kernel_path.display(),
-            config_path.display(),
-            working_dir.display(),
-        );
-        let mut cmd = std::process::Command::new("powershell");
-        cmd.arg("-Command").arg(&script);
-        Ok(cmd)
+        _ = (kernel_path, config_path, working_dir);
+        // On Windows, the GUI should already be running elevated.
+        // If we reach here, the user hasn't relaunched as admin.
+        Err("Please relaunch Box UI as administrator to run the kernel with elevated privileges".to_string())
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
+        _ = (kernel_path, config_path, working_dir);
         Err("Elevated execution is not supported on this platform".to_string())
     }
 }

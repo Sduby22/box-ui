@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigEntry {
     #[serde(default = "Uuid::new_v4")]
@@ -36,6 +37,7 @@ pub struct AppSettings {
     /// Whether to automatically start the kernel when the app launches.
     #[serde(default)]
     pub launch_core_on_start: bool,
+
 }
 
 fn default_max_log_lines() -> usize {
@@ -286,10 +288,14 @@ impl SettingsManager {
         if path.is_file() { Some(path) } else { None }
     }
 
-    /// Return the set of installed kernel filenames (for the releases window).
-    /// Filenames are version tags (e.g. "v1.11.0"), matching GitHub release tag_name.
+    /// Return the set of installed kernel version tags (e.g. "v1.11.0").
+    /// On Windows, kernel filenames have a `.exe` suffix which is stripped here
+    /// so they match GitHub release `tag_name` values.
     pub fn installed_kernel_versions(&self) -> Vec<String> {
         self.kernel_names()
+            .into_iter()
+            .map(|name| name.strip_suffix(".exe").unwrap_or(&name).to_string())
+            .collect()
     }
 
     /// Remove a kernel binary from the kernels directory.

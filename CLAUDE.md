@@ -33,7 +33,7 @@ Left sidebar navigation + content area. Sidebar bottom always shows core status 
 | **Outbounds** | List proxy groups and available nodes via Clash API; switch active node per group |
 | **Connections** | Table of active connections with sorting: process, host, chain, rule, upload/download totals and speeds |
 | **Logs** | Streaming log output from core via WebSocket, with level filtering (debug / info / warn / error) and ANSI color support |
-| **Settings** | Autostart toggle, launch core on start toggle, privileged helper daemon management, about info |
+| **Settings** | Autostart toggle, launch core on start toggle, about info |
 
 ## Core Features
 
@@ -49,15 +49,10 @@ Left sidebar navigation + content area. Sidebar bottom always shows core status 
 - Switch between installed versions
 - Display current core version and running status
 - **Working directory**: All kernel launch modes use a dedicated `pwd/` directory inside the app's data folder
-- **Run as Admin**: Optional elevated execution with three backends:
-  - Direct elevated: platform-specific password prompts (sudo/pkexec/UAC)
-  - Helper daemon: one-time install, no password on subsequent starts
-- **Privileged Helper Daemon**: One-time install of a root-level helper service
-  - macOS: launchd LaunchDaemon + Unix socket (implemented)
-  - Linux: systemd service + Unix socket (planned)
-  - Windows: Windows Service + Named pipe (planned)
-  - Auto-update: GUI updates helper binary when versions mismatch
-  - PID binding: helper auto-exits when GUI process dies
+- **Run as Admin**: Optional elevated execution via one-time permission grant:
+  - macOS/Linux: setuid bit on kernel binary (`chown root && chmod u+s`), one-time password prompt
+  - Windows: GUI self-elevation via UAC, then kernel inherits admin privileges
+  - Automatically re-applies setuid when a new kernel is downloaded (macOS/Linux)
 
 ### 3. Real-time Monitoring (via sing-box Clash API over WebSocket)
 - Traffic speed line chart (`/traffic`)
@@ -71,12 +66,12 @@ Left sidebar navigation + content area. Sidebar bottom always shows core status 
 - Platform-specific implementations:
   - **Linux**: XDG autostart (~/.config/autostart/*.desktop)
   - **macOS**: LaunchAgent plist
-  - **Windows**: Startup folder .bat script
+  - **Windows**: Task Scheduler with `HighestAvailable` run level (when elevated), Startup folder .bat fallback (when not elevated)
 
 ### 5. System Tray
 - Tray icon with context menu (Show / Quit)
 - Minimize to tray on window close
-- Quit handler: stops kernel and shuts down helper before exit
+- Quit handler: stops kernel before exit
 
 ### 6. Cross-Platform Support
 - Linux (X11 / Wayland)
@@ -94,11 +89,10 @@ Left sidebar navigation + content area. Sidebar bottom always shows core status 
 - **WebSocket**: tokio-tungstenite (traffic, connections, logs streaming)
 - **Async Runtime**: tokio
 - **Serialization**: serde + serde_json (sing-box configs are JSON)
-- **Process Management**: std::process::Command / tokio::process
-- **IPC**: Unix domain sockets (macOS/Linux) / Named pipes (Windows) with 4-byte length-prefixed JSON (box-ui-ipc crate)
+- **Process Management**: std::process::Command
 - **Archive Extraction**: flate2 + tar (tar.gz), zip (zip archives) for kernel downloads
 - **File Dialogs**: rfd (native file picker)
-- **Autostart**: Platform-specific implementations (XDG autostart / LaunchAgent / shell:startup)
+- **Autostart**: Platform-specific implementations (XDG autostart / LaunchAgent / Task Scheduler / shell:startup)
 
 ## Project Structure
 
@@ -107,30 +101,22 @@ box-ui/                        # Cargo workspace root
 ├── src/                       # GUI app
 │   ├── main.rs                # Entry point
 │   ├── app.rs                 # Main eframe::App, tray, toast system
+│   ├── fonts.rs               # Font configuration
 │   ├── ui/                    # UI components/panels
 │   │   ├── mod.rs
 │   │   ├── dashboard.rs       # Dashboard: traffic chart, core mgmt, config mgmt
 │   │   ├── outbounds.rs       # Outbound proxy group & node selector
 │   │   ├── connections.rs     # Active connection table with sorting & speed
 │   │   ├── logs.rs            # Log viewer with ANSI color parsing
-│   │   └── settings.rs        # Autostart, launch-on-start, helper, about
+│   │   └── settings.rs        # Autostart, launch-on-start, about
 │   └── core/                  # Business logic
 │       ├── mod.rs             # Module exports + shared format_speed utility
-│       ├── kernel.rs          # sing-box process management (direct + elevated + helper)
+│       ├── kernel.rs          # sing-box process management (direct + elevated via setuid/UAC)
 │       ├── download.rs        # GitHub release fetching, archive extraction, remote config
-│       ├── autostart.rs       # Autostart registration (per-platform)
-│       ├── settings.rs        # AppSettings persistence & SettingsManager
-│       ├── helper_client.rs   # GUI-side IPC client for helper daemon
-│       └── helper_install.rs  # Helper daemon install/uninstall/update (per-platform)
-├── box-ui-helper/             # Privileged helper daemon (runs as root/SYSTEM)
-│   ├── Cargo.toml
-│   └── src/
-│       ├── main.rs            # Entry point (dispatches to unix or windows)
-│       ├── handler.rs         # Request handling, process lifecycle, GUI liveness check
-│       └── unix.rs            # Unix socket listener, peer verification, chown
-├── box-ui-ipc/                # Shared IPC protocol types
-│   ├── Cargo.toml
-│   └── src/lib.rs             # Request/Response enums, wire protocol, platform constants
+│       ├── autostart.rs       # Autostart registration (per-platform, Task Scheduler on Windows)
+│       ├── permissions.rs     # Kernel privilege management (setuid on Unix, elevation on Windows)
+│       ├── platform.rs        # Platform utilities (Job Object child cleanup on Windows)
+│       └── settings.rs        # AppSettings persistence & SettingsManager
 ├── Cargo.toml
 ├── CLAUDE.md
 └── README.md
@@ -157,6 +143,16 @@ cargo build --release  # Release build
 
 ## Development Rules
 
+- **Minimal resource usage**: Prefer stack allocations and avoid heap usage unless necessary. Avoid unnecessary background threads, large static data, or holding locks longer than needed.
+- **Maximum performance**: Profile hot paths regularly. Minimize redraws in the UI by using smart paint triggers (e.g., only repaint when new data arrives or relevant state changes). Use async I/O and event-driven design. Reuse objects and buffers where possible.
+- **Avoid allocations in UI loops**: In `egui` panels/rendering, avoid allocations or heap-allocated objects inside frequently-called UI code. Preallocate data outside the frame loop, and update in-place if possible.
+- **Keep background workers lightweight**: For periodic tasks or watchers, use a single async runtime (tokio) task per functional concern, never block threads, and never spawn new threads unless absolutely necessary.
+- **All allocations and blocking**: Must be justified with a measurable end-user benefit. Prefer `Arc<Mutex<>>` only where unavoidable; use `Atomic*` types for single-value sharing.
+- **Review large dependencies**: Routinely audit dependencies (with `cargo bloat` or `cargo-tree`) to avoid bloat or hidden heavy crates; keep binary lean.
+- **Cross-platform code paths**: Avoid conditional code that penalizes one platform's resource use for another (e.g. only spawn tray/event threads if the platform needs them).
+- **Startup cost**: Minimize work and allocations during startup. Defer initializing non-essential subsystems until after the first UI render.
+- **No persistent resource leaks**: All background tasks, file handles, and processes must be cleanly shut down on quit.
+- **Document performance-critical code**: Any hot path or resource-heavy section must have a short inline comment explaining design choices.
 - **Adding dependencies**: Always use `cargo add <crate>` instead of manually editing `Cargo.toml`.
 - **Linting**: Use `cargo clippy` for code checks and fix all warnings before committing.
 - **Post-modification review**: After each code change, review the modified code and its surrounding context for engineering or performance anti-patterns and fix them. Examples include but are not limited to: unnecessary cloning, redundant allocations, blocking calls in async contexts, missing error propagation, overly broad trait bounds, inefficient data structures, and dead code. Run `cargo clippy` after changes to catch additional issues.

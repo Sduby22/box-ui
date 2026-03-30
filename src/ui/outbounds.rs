@@ -108,8 +108,6 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
 
             ui.group(|ui| {
                 let header = ui.horizontal(|ui| {
-                    let arrow = if is_collapsed { "▶" } else { "▼" };
-                    ui.label(arrow);
                     ui.strong(&group.name);
                     ui.label(format!("({})", group.group_type));
                     if let Some(current) = &group.now {
