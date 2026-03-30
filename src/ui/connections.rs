@@ -78,6 +78,7 @@ pub struct ConnectionsState {
     pub streaming_flag: Arc<AtomicBool>,
     pub sort_column: Option<SortColumn>,
     pub sort_order: SortOrder,
+    pub search_query: String,
     /// Previous snapshot for speed calculation: id -> (upload, download, timestamp).
     prev_bytes: HashMap<String, (u64, u64, Instant)>,
     /// Computed speeds: id -> (upload_speed, download_speed) in bytes/sec.
@@ -96,6 +97,7 @@ impl Default for ConnectionsState {
             streaming_flag: Arc::new(AtomicBool::new(false)),
             sort_column: None,
             sort_order: SortOrder::Ascending,
+            search_query: String::new(),
             prev_bytes: HashMap::new(),
             speeds: HashMap::new(),
             last_snapshot_len: 0,
@@ -180,6 +182,17 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
         start_connections_streaming(app);
     }
 
+    ui.horizontal(|ui| {
+        ui.label("Search:");
+        ui.add(
+            egui::TextEdit::singleline(&mut app.connections_state.search_query)
+                .desired_width(200.0)
+                .hint_text("Filter connections..."),
+        );
+    });
+
+    ui.add_space(8.0);
+
     // Clone the Arc (cheap ref-count bump) so the MutexGuard doesn't borrow
     // ConnectionsState, allowing update_speeds to take &mut self.
     let connections_arc = app.connections_state.connections.clone();
@@ -192,8 +205,21 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
         return;
     }
 
+    let query = app.connections_state.search_query.as_str();
+    let has_filter = !query.is_empty();
+
     let mut rows: Vec<ConnRow<'_>> = connections
         .iter()
+        .filter(|conn| {
+            if !has_filter {
+                return true;
+            }
+            // Match against any string field: process, host, chain, rule
+            contains_ignore_ascii_case(conn.metadata.display_process(), query)
+                || contains_ignore_ascii_case(conn_host(conn), query)
+                || conn.chains.iter().any(|c| contains_ignore_ascii_case(c, query))
+                || contains_ignore_ascii_case(&conn.rule, query)
+        })
         .map(|conn| {
             let (upload_speed, download_speed) = app
                 .connections_state
@@ -432,4 +458,22 @@ fn format_bytes(bytes: u64) -> String {
 
 fn format_speed(bytes_per_sec: f64) -> String {
     crate::core::format_speed(bytes_per_sec)
+}
+
+/// Case-insensitive ASCII substring search without heap allocation.
+fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    if needle.len() > haystack.len() {
+        return false;
+    }
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    'outer: for start in 0..=(h.len() - n.len()) {
+        for j in 0..n.len() {
+            if !h[start + j].eq_ignore_ascii_case(&n[j]) {
+                continue 'outer;
+            }
+        }
+        return true;
+    }
+    false
 }

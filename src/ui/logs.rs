@@ -268,7 +268,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
     scroll.show(ui, |ui| {
         for entry in entries.iter() {
             // Case-insensitive substring match without per-entry String allocation
-            if has_filter && !contains_ignore_ascii_case(&entry.payload, query) {
+            if has_filter && !contains_ignore_ascii_case(&entry.formatted, query) {
                 continue;
             }
             let text = egui::RichText::new(&entry.formatted)
