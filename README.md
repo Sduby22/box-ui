@@ -1,6 +1,12 @@
-# Box UI
+<p align="center">
+  <img src="assets/icons/128.png" alt="Box UI" width="128" height="128">
+</p>
 
-A lightweight, cross-platform GUI wrapper for [sing-box](https://github.com/SagerNet/sing-box), built with Rust and [egui](https://github.com/emilk/egui).
+<h1 align="center">Box UI</h1>
+
+<p align="center">
+  A lightweight, cross-platform GUI wrapper for <a href="https://github.com/SagerNet/sing-box">sing-box</a>, built with Rust and <a href="https://github.com/emilk/egui">egui</a>.
+</p>
 
 > **This is a pure vibe coding project** — built entirely through natural language conversation with AI (Claude Code). If you're curious about how the project is structured and guided, check out [CLAUDE.md](CLAUDE.md).
 
@@ -14,6 +20,10 @@ Box UI provides a minimal graphical interface for managing sing-box, replacing t
 - **System Integration** — System tray, autostart, privileged helper daemon for password-free elevated launches
 
 Supports **Linux**, **macOS**, and **Windows**.
+
+## Screenshot
+
+![Box UI Dashboard](assets/screenshots/Snipaste_2026-03-31_20-47-11.png)
 
 ## Philosophy
 

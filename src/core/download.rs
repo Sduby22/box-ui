@@ -22,6 +22,10 @@ pub async fn fetch_releases(client: &reqwest::Client) -> Result<Vec<Release>, St
         .await
         .map_err(|e| format!("Failed to fetch releases: {e}"))?;
 
+    if !resp.status().is_success() {
+        return Err(format!("Failed to fetch releases: HTTP {}", resp.status()));
+    }
+
     resp.json::<Vec<Release>>()
         .await
         .map_err(|e| format!("Failed to parse releases: {e}"))
