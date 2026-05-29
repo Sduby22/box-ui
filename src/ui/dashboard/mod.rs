@@ -2,7 +2,7 @@ mod config;
 mod kernel;
 mod traffic;
 
-pub use config::{restart_kernel_if_running, start_config_refresh_task};
+pub use config::{ensure_config_refresh_task, restart_kernel_if_running, stop_config_refresh_task};
 pub use traffic::start_traffic_polling;
 
 use eframe::egui;

@@ -7,6 +7,7 @@ mod ui;
 
 use eframe::egui;
 use std::process::Child;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Shared 128x128 app icon PNG, embedded at compile time.
@@ -17,6 +18,8 @@ pub static APP_ICON_PNG: &[u8] = include_bytes!("../assets/icons/128.png");
 pub struct TrayState {
     /// egui context for the window (allows tray thread to show/focus it).
     pub egui_ctx: Mutex<Option<egui::Context>>,
+    /// Set by tray Quit so the close handler allows a real app shutdown.
+    pub quit_requested: AtomicBool,
 }
 
 fn main() -> eframe::Result<()> {
@@ -75,6 +78,7 @@ fn main() -> eframe::Result<()> {
 
     let tray_state = Arc::new(TrayState {
         egui_ctx: Mutex::new(None),
+        quit_requested: AtomicBool::new(false),
     });
     let _tray_icon = setup_tray(tray_state.clone(), kernel_backend.clone());
     let tray_enabled = _tray_icon.is_some();
@@ -179,8 +183,21 @@ fn setup_tray(
                         ctx.request_repaint();
                     }
                 } else if event.id() == &quit_id {
-                    core::kernel::shutdown_backend(&kernel_backend);
-                    std::process::exit(0);
+                    tray_state.quit_requested.store(true, Ordering::Relaxed);
+                    let ctx_opt = match tray_state.egui_ctx.lock() {
+                        Ok(ctx) => ctx.clone(),
+                        Err(e) => {
+                            tracing::warn!("Tray state lock was poisoned: {e}");
+                            None
+                        }
+                    };
+                    if let Some(ctx) = ctx_opt {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        ctx.request_repaint();
+                    } else {
+                        core::kernel::shutdown_backend(&kernel_backend);
+                        std::process::exit(0);
+                    }
                 }
             }
         })

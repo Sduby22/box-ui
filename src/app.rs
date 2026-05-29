@@ -60,6 +60,7 @@ pub struct BoxApp {
     pub logs_state: ui::logs::LogsState,
     pub settings_state: ui::settings::SettingsState,
     pub runtime: tokio::runtime::Handle,
+    pub tray_state: Arc<TrayState>,
     pub tray_enabled: bool,
     /// Cached per-frame to avoid repeated Mutex lock + syscall
     pub cached_is_running: bool,
@@ -122,6 +123,7 @@ impl BoxApp {
             logs_state,
             settings_state,
             runtime,
+            tray_state,
             tray_enabled,
             cached_is_running: false,
         }
@@ -176,7 +178,48 @@ impl BoxApp {
             });
     }
 
-    fn stop_background_streams(&mut self) {
+    fn update_app_background_services(&mut self) {
+        self.cached_is_running = self.kernel_manager.is_running();
+
+        if let Some(error_msg) = self.kernel_manager.take_unexpected_exit() {
+            push_toast(&self.toasts, ToastKind::Error, error_msg);
+        }
+
+        self.process_config_refresh_events();
+        ui::dashboard::ensure_config_refresh_task(self);
+    }
+
+    fn process_config_refresh_events(&mut self) {
+        let refreshed: Vec<uuid::Uuid> = self
+            .dashboard_state
+            .config
+            .refreshed_config_ids
+            .lock()
+            .unwrap()
+            .drain(..)
+            .collect();
+        if refreshed.is_empty() {
+            return;
+        }
+
+        let active_id = self.settings_manager.active_config_id();
+        let active_refreshed = refreshed.iter().any(|id| Some(*id) == active_id);
+        for id in &refreshed {
+            if let Some(config) = self.settings_manager.configs().iter().find(|c| c.id == *id) {
+                push_toast(
+                    &self.toasts,
+                    ToastKind::Success,
+                    format!("Config \"{}\" refreshed", config.name),
+                );
+            }
+        }
+        if active_refreshed {
+            self.refresh_clash_api_base();
+            ui::dashboard::restart_kernel_if_running(self);
+        }
+    }
+
+    fn stop_live_monitoring_streams(&mut self) {
         self.dashboard_state
             .traffic
             .polling_flag
@@ -201,6 +244,11 @@ impl BoxApp {
         if let Some(handle) = self.logs_state.streaming_handle.take() {
             handle.abort();
         }
+    }
+
+    fn stop_all_background_tasks(&mut self) {
+        self.stop_live_monitoring_streams();
+        ui::dashboard::stop_config_refresh_task(self);
     }
 
     fn release_hidden_memory(&mut self, ctx: &egui::Context) {
@@ -247,6 +295,14 @@ impl BoxApp {
 }
 
 impl eframe::App for BoxApp {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.tray_state.quit_requested.load(Ordering::Relaxed) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        self.update_app_background_services();
+        ctx.request_repaint_after(std::time::Duration::from_secs(1));
+    }
+
     fn ui(&mut self, root_ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = root_ui.ctx().clone();
 
@@ -256,17 +312,20 @@ impl eframe::App for BoxApp {
         // When release_memory_on_hide is enabled, we additionally clear heavy
         // application state and egui caches to reduce memory while hidden.
         if ctx.input(|i| i.viewport().close_requested()) {
-            self.stop_background_streams();
+            let quit_requested = self
+                .tray_state
+                .quit_requested
+                .swap(false, Ordering::Relaxed);
+            self.stop_live_monitoring_streams();
 
-            if self.tray_enabled {
+            if self.tray_enabled && !quit_requested {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                 self.release_hidden_memory(&ctx);
+            } else {
+                self.stop_all_background_tasks();
             }
         }
-
-        // Cache is_running once per frame (avoids repeated Mutex lock + try_wait syscall)
-        self.cached_is_running = self.kernel_manager.is_running();
 
         // Sync & start traffic polling globally (sidebar needs live speed data)
         self.dashboard_state.traffic.traffic_polling = self
@@ -277,52 +336,6 @@ impl eframe::App for BoxApp {
         if self.cached_is_running && !self.dashboard_state.traffic.traffic_polling {
             ui::dashboard::start_traffic_polling(self);
         }
-
-        // Show error toast if the kernel exited unexpectedly
-        if let Some(error_msg) = self.kernel_manager.take_unexpected_exit() {
-            push_toast(&self.toasts, ToastKind::Error, error_msg);
-        }
-
-        // Handle configs refreshed by the background auto-refresh task.
-        // Runs at app level so it works regardless of active tab or window visibility.
-        let refreshed: Vec<uuid::Uuid> = self
-            .dashboard_state
-            .config
-            .refreshed_config_ids
-            .lock()
-            .unwrap()
-            .drain(..)
-            .collect();
-        if !refreshed.is_empty() {
-            let active_id = self.settings_manager.active_config_id();
-            let active_refreshed = refreshed.iter().any(|id| Some(*id) == active_id);
-            for id in &refreshed {
-                if let Some(config) = self.settings_manager.configs().iter().find(|c| c.id == *id) {
-                    push_toast(
-                        &self.toasts,
-                        ToastKind::Success,
-                        format!("Config \"{}\" refreshed", config.name),
-                    );
-                }
-            }
-            if active_refreshed {
-                self.refresh_clash_api_base();
-                ui::dashboard::restart_kernel_if_running(self);
-            }
-        }
-
-        // Start subscription auto-refresh task if not already running
-        if !self
-            .dashboard_state
-            .config
-            .refresh_task_running
-            .load(Ordering::Relaxed)
-        {
-            ui::dashboard::start_config_refresh_task(self);
-        }
-
-        // Request repaint for real-time updates
-        ctx.request_repaint_after(std::time::Duration::from_secs(1));
 
         egui::Panel::left("sidebar")
             .resizable(false)
@@ -387,7 +400,7 @@ impl eframe::App for BoxApp {
 
 impl Drop for BoxApp {
     fn drop(&mut self) {
-        self.stop_background_streams();
+        self.stop_all_background_tasks();
         let _ = self.kernel_manager.stop();
     }
 }

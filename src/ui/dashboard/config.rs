@@ -48,6 +48,10 @@ pub struct ConfigState {
     pub remote_config_downloading: Arc<AtomicBool>,
     /// Whether the subscription auto-refresh task is running
     pub refresh_task_running: Arc<AtomicBool>,
+    /// Handle for the app-level subscription refresh service.
+    pub refresh_task_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Whether startup/no-op initialization has already been evaluated.
+    pub refresh_task_initialized: bool,
     /// Config IDs that were refreshed by the background task (need kernel restart if active)
     pub refreshed_config_ids: Arc<Mutex<Vec<Uuid>>>,
     /// Whether the edit-config window is open
@@ -78,6 +82,8 @@ impl Default for ConfigState {
             pending_remote_config: Arc::new(Mutex::new(Vec::new())),
             remote_config_downloading: Arc::new(AtomicBool::new(false)),
             refresh_task_running: Arc::new(AtomicBool::new(false)),
+            refresh_task_handle: None,
+            refresh_task_initialized: false,
             refreshed_config_ids: Arc::new(Mutex::new(Vec::new())),
             show_edit_config_window: false,
             edit_config_id: None,
@@ -177,11 +183,7 @@ pub fn show_config_manager(ui: &mut egui::Ui, app: &mut BoxApp) {
         }
         Some(ConfigAction::Remove(id)) => {
             app.settings_manager.remove_config(id);
-            // Signal the refresh task to restart without the removed config
-            app.dashboard_state
-                .config
-                .refresh_task_running
-                .store(false, Ordering::Relaxed);
+            restart_config_refresh_task(app);
         }
         Some(ConfigAction::Refresh(id)) => {
             if let Some(config) = app.settings_manager.configs().iter().find(|c| c.id == id)
@@ -221,7 +223,8 @@ pub fn process_pending_configs(app: &mut BoxApp) {
         .pending_remote_config
         .lock()
         .unwrap();
-    if !pending_configs.is_empty() {
+    let has_new_configs = !pending_configs.is_empty();
+    if has_new_configs {
         for pending in pending_configs.drain(..) {
             app.settings_manager.add_remote_config(
                 pending.name,
@@ -229,11 +232,6 @@ pub fn process_pending_configs(app: &mut BoxApp) {
                 pending.refresh_interval_minutes,
             );
         }
-        // Signal the refresh task to restart with the new config list
-        app.dashboard_state
-            .config
-            .refresh_task_running
-            .store(false, Ordering::Relaxed);
         // Close the dialog and clear inputs on successful download
         app.dashboard_state.config.show_add_config_window = false;
         app.dashboard_state.config.add_config_name_input.clear();
@@ -241,6 +239,9 @@ pub fn process_pending_configs(app: &mut BoxApp) {
         app.dashboard_state.config.add_config_interval_input = "60".to_string();
     }
     drop(pending_configs);
+    if has_new_configs {
+        restart_config_refresh_task(app);
+    }
 
     // Persist remote config edits that completed their fetch successfully
     let mut pending_edits = app
@@ -249,7 +250,8 @@ pub fn process_pending_configs(app: &mut BoxApp) {
         .pending_remote_config_edit
         .lock()
         .unwrap();
-    if !pending_edits.is_empty() {
+    let has_pending_edits = !pending_edits.is_empty();
+    if has_pending_edits {
         for edit in pending_edits.drain(..) {
             let source = ConfigSource::Remote {
                 url: edit.url,
@@ -265,15 +267,13 @@ pub fn process_pending_configs(app: &mut BoxApp) {
                 .unwrap()
                 .push(edit.id);
         }
-        // Signal the refresh task to restart with updated config data
-        app.dashboard_state
-            .config
-            .refresh_task_running
-            .store(false, Ordering::Relaxed);
         // Close the edit dialog
         app.dashboard_state.config.show_edit_config_window = false;
     }
     drop(pending_edits);
+    if has_pending_edits {
+        restart_config_refresh_task(app);
+    }
 }
 
 pub fn show_add_config_window(ctx: &egui::Context, app: &mut BoxApp) {
@@ -689,9 +689,54 @@ pub fn restart_kernel_if_running(app: &mut BoxApp) {
     }
 }
 
+/// Ensure the app-level subscription refresh service has been initialized.
+pub fn ensure_config_refresh_task(app: &mut BoxApp) {
+    let needs_start = {
+        let state = &mut app.dashboard_state.config;
+        if state
+            .refresh_task_handle
+            .as_ref()
+            .is_some_and(|handle| handle.is_finished())
+        {
+            state.refresh_task_handle.take();
+            state.refresh_task_running.store(false, Ordering::Relaxed);
+            state.refresh_task_initialized = false;
+        }
+
+        !state.refresh_task_initialized
+    };
+
+    if needs_start {
+        start_config_refresh_task(app);
+    }
+}
+
+/// Stop the app-level subscription refresh service.
+pub fn stop_config_refresh_task(app: &mut BoxApp) {
+    let state = &mut app.dashboard_state.config;
+    state.refresh_task_running.store(false, Ordering::Relaxed);
+    state.refresh_task_initialized = false;
+    if let Some(handle) = state.refresh_task_handle.take() {
+        handle.abort();
+    }
+}
+
+/// Restart the subscription refresh service after the config list changes.
+pub fn restart_config_refresh_task(app: &mut BoxApp) {
+    stop_config_refresh_task(app);
+    ensure_config_refresh_task(app);
+}
+
 /// Spawn a long-running background task that periodically checks remote configs
 /// and refreshes any that are due. Loops every 60 seconds while the flag is set.
-pub fn start_config_refresh_task(app: &mut BoxApp) {
+fn start_config_refresh_task(app: &mut BoxApp) {
+    if app.dashboard_state.config.refresh_task_handle.is_some() {
+        app.dashboard_state.config.refresh_task_initialized = true;
+        return;
+    }
+
+    app.dashboard_state.config.refresh_task_initialized = true;
+
     // Collect remote config info needed by the task
     let remote_configs: Vec<(Uuid, String, std::path::PathBuf, u32)> = app
         .settings_manager
@@ -707,6 +752,10 @@ pub fn start_config_refresh_task(app: &mut BoxApp) {
         .collect();
 
     if remote_configs.is_empty() {
+        app.dashboard_state
+            .config
+            .refresh_task_running
+            .store(false, Ordering::Relaxed);
         return;
     }
 
@@ -717,7 +766,7 @@ pub fn start_config_refresh_task(app: &mut BoxApp) {
 
     running_flag.store(true, Ordering::Relaxed);
 
-    app.runtime.spawn(async move {
+    let handle = app.runtime.spawn(async move {
         // Initial delay to avoid hammering on startup
         for _ in 0..60 {
             if !running_flag.load(Ordering::Relaxed) {
@@ -777,6 +826,7 @@ pub fn start_config_refresh_task(app: &mut BoxApp) {
             }
         }
     });
+    app.dashboard_state.config.refresh_task_handle = Some(handle);
 }
 
 fn rfd_pick_file(title: &str) -> Option<std::path::PathBuf> {

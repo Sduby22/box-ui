@@ -3,7 +3,7 @@ members = ["."]
 resolver = "2"
 
 [workspace.package]
-version = "0.5.4"
+version = "0.5.5"
 
 [package]
 name = "box-ui"
@@ -47,4 +47,3 @@ windows-sys = { version = "0.61.2", features = ["Win32_System_ProcessStatus", "W
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource = "0.1.31"
-

@@ -8,7 +8,7 @@
   A lightweight, cross-platform GUI wrapper for <a href="https://github.com/SagerNet/sing-box">sing-box</a>, built with Rust and <a href="https://github.com/emilk/egui">egui</a>.
 </p>
 
-> **This is a pure vibe coding project** — built entirely through natural language conversation with AI (Claude Code). If you're curious about how the project is structured and guided, check out [CLAUDE.md](CLAUDE.md).
+> **This is a pure vibe coding project** — built entirely through natural language conversation with AI coding agents. If you're curious about how the project is structured and guided, check out [AGENTS.md](AGENTS.md) and [CLAUDE.md](CLAUDE.md).
 
 ## What It Does
 
