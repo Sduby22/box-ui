@@ -60,6 +60,7 @@ pub struct BoxApp {
     pub logs_state: ui::logs::LogsState,
     pub settings_state: ui::settings::SettingsState,
     pub runtime: tokio::runtime::Handle,
+    pub tray_enabled: bool,
     /// Cached per-frame to avoid repeated Mutex lock + syscall
     pub cached_is_running: bool,
 }
@@ -69,6 +70,7 @@ impl BoxApp {
         cc: &eframe::CreationContext<'_>,
         kernel_backend: Arc<Mutex<Option<Child>>>,
         tray_state: Arc<TrayState>,
+        tray_enabled: bool,
     ) -> Self {
         let runtime = tokio::runtime::Handle::current();
         let data_dir = dirs::data_dir()
@@ -92,6 +94,13 @@ impl BoxApp {
         crate::core::autostart::repair_if_needed();
         let settings_state = ui::settings::SettingsState::default();
         let toasts: Toasts = Arc::new(Mutex::new(VecDeque::new()));
+        let http_client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_else(|e| {
+                tracing::warn!("Failed to build configured HTTP client, using default: {e}");
+                reqwest::Client::new()
+            });
 
         // Reuse the persistent kernel backend so a running kernel survives window cycles.
         let kernel_manager = KernelManager::with_backend(kernel_path, kernel_backend);
@@ -105,7 +114,7 @@ impl BoxApp {
             settings_manager,
             clash_api_base,
             clash_api_secret,
-            http_client: reqwest::Client::new(),
+            http_client,
             toasts,
             dashboard_state: ui::dashboard::DashboardState::default(),
             outbounds_state: ui::outbounds::OutboundsState::default(),
@@ -113,6 +122,7 @@ impl BoxApp {
             logs_state,
             settings_state,
             runtime,
+            tray_enabled,
             cached_is_running: false,
         }
     }
@@ -165,61 +175,93 @@ impl BoxApp {
                 }
             });
     }
+
+    fn stop_background_streams(&mut self) {
+        self.dashboard_state
+            .traffic
+            .polling_flag
+            .store(false, Ordering::Relaxed);
+        self.dashboard_state.traffic.traffic_polling = false;
+        if let Some(handle) = self.dashboard_state.traffic.polling_handle.take() {
+            handle.abort();
+        }
+
+        self.connections_state
+            .streaming_flag
+            .store(false, Ordering::Relaxed);
+        self.connections_state.streaming = false;
+        if let Some(handle) = self.connections_state.streaming_handle.take() {
+            handle.abort();
+        }
+
+        self.logs_state
+            .streaming_flag
+            .store(false, Ordering::Relaxed);
+        self.logs_state.streaming = false;
+        if let Some(handle) = self.logs_state.streaming_handle.take() {
+            handle.abort();
+        }
+    }
+
+    fn release_hidden_memory(&mut self, ctx: &egui::Context) {
+        if !self.settings_manager.release_memory_on_hide() {
+            return;
+        }
+
+        // Clear heavy application state to free memory while hidden.
+        self.dashboard_state
+            .traffic
+            .traffic_history
+            .lock()
+            .unwrap()
+            .clear();
+        self.connections_state.connections.lock().unwrap().clear();
+        self.connections_state.clear_speed_cache();
+        self.outbounds_state.groups.lock().unwrap().clear();
+        self.outbounds_state.expanded.clear();
+        self.outbounds_state.last_fetch = None;
+        self.logs_state.entries.lock().unwrap().clear();
+        self.toasts.lock().unwrap().clear();
+        // Clear egui's internal layout/paint caches.
+        ctx.memory_mut(|m| *m = Default::default());
+
+        // Platform-specific: return freed memory to the OS immediately.
+        #[cfg(target_os = "windows")]
+        {
+            // Evict all pages from the working set; accessed pages will
+            // soft-fault back in on demand.
+            use windows_sys::Win32::System::ProcessStatus::EmptyWorkingSet;
+            use windows_sys::Win32::System::Threading::GetCurrentProcess;
+            unsafe {
+                EmptyWorkingSet(GetCurrentProcess());
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            // glibc: release free heap pages back to the kernel.
+            unsafe {
+                libc::malloc_trim(0);
+            }
+        }
+    }
 }
 
 impl eframe::App for BoxApp {
     fn ui(&mut self, root_ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = root_ui.ctx().clone();
 
-        // Handle window close: always cancel and hide instead of destroying.
+        // Handle window close: cancel and hide when tray restore is available.
         // On macOS, letting eframe::run_native return terminates the
         // NSApplication event loop, which makes the tray icon unresponsive.
         // When release_memory_on_hide is enabled, we additionally clear heavy
         // application state and egui caches to reduce memory while hidden.
         if ctx.input(|i| i.viewport().close_requested()) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            self.stop_background_streams();
 
-            // Always stop background streams to save CPU while hidden
-            self.dashboard_state
-                .traffic
-                .polling_flag
-                .store(false, Ordering::Relaxed);
-            self.dashboard_state.traffic.traffic_polling = false;
-            self.connections_state
-                .streaming_flag
-                .store(false, Ordering::Relaxed);
-            self.logs_state
-                .streaming_flag
-                .store(false, Ordering::Relaxed);
-
-            if self.settings_manager.release_memory_on_hide() {
-                // Clear heavy application state to free memory while hidden.
-                self.dashboard_state.traffic.traffic_history.lock().unwrap().clear();
-                self.connections_state.connections.lock().unwrap().clear();
-                self.connections_state.clear_speed_cache();
-                self.outbounds_state.groups.lock().unwrap().clear();
-                self.outbounds_state.expanded.clear();
-                self.outbounds_state.last_fetch = None;
-                self.logs_state.entries.lock().unwrap().clear();
-                self.toasts.lock().unwrap().clear();
-                // Clear egui's internal layout/paint caches.
-                ctx.memory_mut(|m| *m = Default::default());
-
-                // Platform-specific: return freed memory to the OS immediately.
-                #[cfg(target_os = "windows")]
-                {
-                    // Evict all pages from the working set; accessed pages will
-                    // soft-fault back in on demand.
-                    use windows_sys::Win32::System::ProcessStatus::EmptyWorkingSet;
-                    use windows_sys::Win32::System::Threading::GetCurrentProcess;
-                    unsafe { EmptyWorkingSet(GetCurrentProcess()); }
-                }
-                #[cfg(target_os = "linux")]
-                {
-                    // glibc: release free heap pages back to the kernel.
-                    unsafe { libc::malloc_trim(0); }
-                }
+            if self.tray_enabled {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                self.release_hidden_memory(&ctx);
             }
         }
 
@@ -227,8 +269,11 @@ impl eframe::App for BoxApp {
         self.cached_is_running = self.kernel_manager.is_running();
 
         // Sync & start traffic polling globally (sidebar needs live speed data)
-        self.dashboard_state.traffic.traffic_polling =
-            self.dashboard_state.traffic.polling_flag.load(Ordering::Relaxed);
+        self.dashboard_state.traffic.traffic_polling = self
+            .dashboard_state
+            .traffic
+            .polling_flag
+            .load(Ordering::Relaxed);
         if self.cached_is_running && !self.dashboard_state.traffic.traffic_polling {
             ui::dashboard::start_traffic_polling(self);
         }
@@ -267,7 +312,12 @@ impl eframe::App for BoxApp {
         }
 
         // Start subscription auto-refresh task if not already running
-        if !self.dashboard_state.config.refresh_task_running.load(Ordering::Relaxed) {
+        if !self
+            .dashboard_state
+            .config
+            .refresh_task_running
+            .load(Ordering::Relaxed)
+        {
             ui::dashboard::start_config_refresh_task(self);
         }
 
@@ -332,5 +382,12 @@ impl eframe::App for BoxApp {
 
         // Render toasts on top
         self.show_toasts(&ctx);
+    }
+}
+
+impl Drop for BoxApp {
+    fn drop(&mut self) {
+        self.stop_background_streams();
+        let _ = self.kernel_manager.stop();
     }
 }

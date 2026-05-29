@@ -73,75 +73,16 @@ fn main() -> eframe::Result<()> {
         }
     }
 
-    // Build tray icon once — persists for the entire process lifetime.
-    use tray_icon::menu::{Menu, MenuEvent, MenuItem};
-    use tray_icon::TrayIconBuilder;
-
-    let tray_menu = Menu::new();
-    let show_item = MenuItem::new("Show", true, None);
-    let quit_item = MenuItem::new("Quit", true, None);
-    tray_menu
-        .append(&show_item)
-        .expect("failed to add tray menu item");
-    tray_menu
-        .append(&quit_item)
-        .expect("failed to add tray menu item");
-
-    let show_id = show_item.id().clone();
-    let quit_id = quit_item.id().clone();
-
-    // Reuse the shared 128x128 PNG for the tray icon (already small enough).
-    let icon_data =
-        eframe::icon_data::from_png_bytes(APP_ICON_PNG).expect("failed to decode tray icon PNG");
-    let tray_icon_image =
-        tray_icon::Icon::from_rgba(icon_data.rgba, icon_data.width, icon_data.height)
-            .expect("failed to create tray icon");
-
-    // Dropping the tray icon removes it from the system tray — keep it alive.
-    let _tray_icon = TrayIconBuilder::new()
-        .with_menu(Box::new(tray_menu))
-        .with_icon(tray_icon_image)
-        .with_tooltip("Box UI")
-        .build()
-        .expect("failed to build tray icon");
-
     let tray_state = Arc::new(TrayState {
         egui_ctx: Mutex::new(None),
     });
+    let _tray_icon = setup_tray(tray_state.clone(), kernel_backend.clone());
+    let tray_enabled = _tray_icon.is_some();
 
-    // Background thread to handle tray menu events.
-    {
-        let tray = tray_state.clone();
-        let backend = kernel_backend.clone();
-        std::thread::Builder::new()
-            .name("tray-events".into())
-            .spawn(move || {
-                let menu_rx = MenuEvent::receiver();
-                // Block on recv() instead of busy-polling with try_recv + sleep.
-                // Zero CPU usage while idle, instant response on menu click.
-                while let Ok(event) = menu_rx.recv() {
-                    if event.id() == &show_id {
-                        // Clone ctx and drop the lock before calling egui methods.
-                        let ctx_opt = tray.egui_ctx.lock().unwrap().clone();
-                        if let Some(ctx) = ctx_opt {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                            ctx.request_repaint();
-                        }
-                    } else if event.id() == &quit_id {
-                        core::kernel::shutdown_backend(&backend);
-                        std::process::exit(0);
-                    }
-                }
-            })
-            .expect("failed to spawn tray event thread");
-    }
-
-    // The window is never destroyed — close events are always cancelled and the
-    // window is hidden instead. This keeps the platform event loop (NSApplication
-    // on macOS) alive, which is required for the tray icon to remain responsive.
-    let icon =
-        eframe::icon_data::from_png_bytes(APP_ICON_PNG).expect("failed to decode app icon");
+    // When the tray is available, close events are cancelled by the app and the
+    // window is hidden instead. This keeps the platform event loop alive so the
+    // tray icon remains responsive.
+    let icon = eframe::icon_data::from_png_bytes(APP_ICON_PNG).expect("failed to decode app icon");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([900.0, 600.0])
@@ -154,7 +95,99 @@ fn main() -> eframe::Result<()> {
         "Box UI",
         options,
         Box::new(move |cc| {
-            Ok(Box::new(app::BoxApp::new(cc, kernel_backend, tray_state)))
+            Ok(Box::new(app::BoxApp::new(
+                cc,
+                kernel_backend,
+                tray_state,
+                tray_enabled,
+            )))
         }),
     )
+}
+
+fn setup_tray(
+    tray_state: Arc<TrayState>,
+    kernel_backend: Arc<Mutex<Option<Child>>>,
+) -> Option<tray_icon::TrayIcon> {
+    use tray_icon::TrayIconBuilder;
+    use tray_icon::menu::{Menu, MenuEvent, MenuItem};
+
+    let tray_menu = Menu::new();
+    let show_item = MenuItem::new("Show", true, None);
+    let quit_item = MenuItem::new("Quit", true, None);
+
+    if let Err(e) = tray_menu.append(&show_item) {
+        tracing::warn!("Failed to add tray show menu item: {e}");
+        return None;
+    }
+    if let Err(e) = tray_menu.append(&quit_item) {
+        tracing::warn!("Failed to add tray quit menu item: {e}");
+        return None;
+    }
+
+    let show_id = show_item.id().clone();
+    let quit_id = quit_item.id().clone();
+
+    let icon_data = match eframe::icon_data::from_png_bytes(APP_ICON_PNG) {
+        Ok(icon) => icon,
+        Err(e) => {
+            tracing::warn!("Failed to decode tray icon: {e}");
+            return None;
+        }
+    };
+    let tray_icon_image =
+        match tray_icon::Icon::from_rgba(icon_data.rgba, icon_data.width, icon_data.height) {
+            Ok(icon) => icon,
+            Err(e) => {
+                tracing::warn!("Failed to create tray icon: {e}");
+                return None;
+            }
+        };
+
+    let tray_icon = match TrayIconBuilder::new()
+        .with_menu(Box::new(tray_menu))
+        .with_icon(tray_icon_image)
+        .with_tooltip("Box UI")
+        .build()
+    {
+        Ok(icon) => icon,
+        Err(e) => {
+            tracing::warn!("Failed to build tray icon; close button will quit instead: {e}");
+            return None;
+        }
+    };
+
+    if let Err(e) = std::thread::Builder::new()
+        .name("tray-events".into())
+        .spawn(move || {
+            let menu_rx = MenuEvent::receiver();
+            // Block on recv() instead of busy-polling with try_recv + sleep.
+            // Zero CPU usage while idle, instant response on menu click.
+            while let Ok(event) = menu_rx.recv() {
+                if event.id() == &show_id {
+                    // Clone ctx and drop the lock before calling egui methods.
+                    let ctx_opt = match tray_state.egui_ctx.lock() {
+                        Ok(ctx) => ctx.clone(),
+                        Err(e) => {
+                            tracing::warn!("Tray state lock was poisoned: {e}");
+                            None
+                        }
+                    };
+                    if let Some(ctx) = ctx_opt {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                        ctx.request_repaint();
+                    }
+                } else if event.id() == &quit_id {
+                    core::kernel::shutdown_backend(&kernel_backend);
+                    std::process::exit(0);
+                }
+            }
+        })
+    {
+        tracing::warn!("Failed to spawn tray event thread: {e}");
+        return None;
+    }
+
+    Some(tray_icon)
 }

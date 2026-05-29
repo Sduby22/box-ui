@@ -59,13 +59,17 @@ impl KernelManager {
             super::permissions::grant_kernel_permissions(&kernel_path)?;
         }
 
-        let needs_elevation_wrapper = elevated && !super::permissions::has_kernel_permissions(&kernel_path);
+        let needs_elevation_wrapper =
+            elevated && !super::permissions::has_kernel_permissions(&kernel_path);
 
         let mut cmd = if needs_elevation_wrapper {
             build_elevated_command(&kernel_path, config_path, working_dir)?
         } else {
             let mut c = std::process::Command::new(&kernel_path);
-            c.arg("run").arg("-c").arg(config_path).current_dir(working_dir);
+            c.arg("run")
+                .arg("-c")
+                .arg(config_path)
+                .current_dir(working_dir);
             #[cfg(target_os = "windows")]
             {
                 use std::os::windows::process::CommandExt;
@@ -88,6 +92,8 @@ impl KernelManager {
             .stderr(stderr_mode)
             .spawn()
             .map_err(|e| format!("Failed to start kernel: {e}"))?;
+
+        super::platform::register_child_process(&child);
 
         *self.stderr.lock().unwrap() = if needs_elevation_wrapper {
             child.stderr.take()
@@ -217,7 +223,10 @@ fn build_elevated_command(
         _ = (kernel_path, config_path, working_dir);
         // On Windows, the GUI should already be running elevated.
         // If we reach here, the user hasn't relaunched as admin.
-        Err("Please relaunch Box UI as administrator to run the kernel with elevated privileges".to_string())
+        Err(
+            "Please relaunch Box UI as administrator to run the kernel with elevated privileges"
+                .to_string(),
+        )
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]

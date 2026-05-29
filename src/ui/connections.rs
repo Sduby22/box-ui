@@ -39,7 +39,9 @@ impl ConnectionMetadata {
             return p;
         }
         if let Some(ref path) = self.process_path
-            && let Some(name) = std::path::Path::new(path).file_name().and_then(|n| n.to_str())
+            && let Some(name) = std::path::Path::new(path)
+                .file_name()
+                .and_then(|n| n.to_str())
         {
             return name;
         }
@@ -124,10 +126,7 @@ impl ConnectionsState {
     /// (new WebSocket message), not on every UI repaint.
     fn update_speeds(&mut self, connections: &[Connection]) {
         // Quick fingerprint: number of connections + total bytes
-        let total_bytes: u64 = connections
-            .iter()
-            .map(|c| c.upload + c.download)
-            .sum();
+        let total_bytes: u64 = connections.iter().map(|c| c.upload + c.download).sum();
         if connections.len() == self.last_snapshot_len && total_bytes == self.last_snapshot_bytes {
             return; // Data unchanged since last update, keep existing speeds
         }
@@ -170,7 +169,6 @@ impl ConnectionsState {
             self.sort_order = SortOrder::Ascending;
         }
     }
-
 }
 
 pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
@@ -178,8 +176,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
     ui.add_space(8.0);
 
     // Sync streaming state from async task
-    app.connections_state.streaming =
-        app.connections_state.streaming_flag.load(Ordering::Relaxed);
+    app.connections_state.streaming = app.connections_state.streaming_flag.load(Ordering::Relaxed);
 
     // Start WebSocket streaming if core is running and not already streaming
     if app.cached_is_running && !app.connections_state.streaming {
@@ -221,7 +218,10 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
             // Match against any string field: process, host, chain, rule
             contains_ignore_ascii_case(conn.metadata.display_process(), query)
                 || contains_ignore_ascii_case(conn_host(conn), query)
-                || conn.chains.iter().any(|c| contains_ignore_ascii_case(c, query))
+                || conn
+                    .chains
+                    .iter()
+                    .any(|c| contains_ignore_ascii_case(c, query))
                 || contains_ignore_ascii_case(&conn.rule, query)
         })
         .map(|conn| {
@@ -299,10 +299,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
         let mut table = TableBuilder::new(ui)
             .striped(true)
             .resizable(true)
-            .cell_layout(
-                egui::Layout::left_to_right(egui::Align::Center)
-                    .with_main_wrap(false),
-            );
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(false));
 
         for _ in columns {
             table = table.column(Column::initial(initial_col_width).clip(true));
@@ -321,14 +318,10 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
                         };
                         let text = format!("{label}{indicator}");
                         // Make the entire cell clickable
-                        let response = ui.interact(
-                            ui.max_rect(),
-                            ui.id().with(col),
-                            egui::Sense::click(),
-                        );
+                        let response =
+                            ui.interact(ui.max_rect(), ui.id().with(col), egui::Sense::click());
                         ui.add(
-                            egui::Label::new(egui::RichText::new(text).strong())
-                                .selectable(false),
+                            egui::Label::new(egui::RichText::new(text).strong()).selectable(false),
                         );
                         if response.clicked() {
                             clicked_column = Some(col);
@@ -340,14 +333,30 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
                 body.rows(text_height + 4.0, rows.len(), |mut row| {
                     let r = &rows[row.index()];
                     let conn = r.conn;
-                    row.col(|ui| { ui.label(conn.metadata.display_process()); });
-                    row.col(|ui| { ui.label(conn_host(conn)); });
-                    row.col(|ui| { ui.label(chain_str(conn)); });
-                    row.col(|ui| { ui.label(&conn.rule); });
-                    row.col(|ui| { ui.label(format_bytes(conn.upload)); });
-                    row.col(|ui| { ui.label(format_bytes(conn.download)); });
-                    row.col(|ui| { ui.label(format_speed(r.upload_speed)); });
-                    row.col(|ui| { ui.label(format_speed(r.download_speed)); });
+                    row.col(|ui| {
+                        ui.label(conn.metadata.display_process());
+                    });
+                    row.col(|ui| {
+                        ui.label(conn_host(conn));
+                    });
+                    row.col(|ui| {
+                        ui.label(chain_str(conn));
+                    });
+                    row.col(|ui| {
+                        ui.label(&conn.rule);
+                    });
+                    row.col(|ui| {
+                        ui.label(format_bytes(conn.upload));
+                    });
+                    row.col(|ui| {
+                        ui.label(format_bytes(conn.download));
+                    });
+                    row.col(|ui| {
+                        ui.label(format_speed(r.upload_speed));
+                    });
+                    row.col(|ui| {
+                        ui.label(format_speed(r.download_speed));
+                    });
                 });
             });
     });
@@ -411,10 +420,7 @@ fn start_connections_streaming(app: &mut BoxApp) {
     streaming_flag.store(true, Ordering::Relaxed);
 
     let handle = app.runtime.spawn(async move {
-        let mut ws_url = format!(
-            "{}/connections",
-            base_url.replacen("http", "ws", 1)
-        );
+        let mut ws_url = format!("{}/connections", base_url.replacen("http", "ws", 1));
         if !secret.is_empty() {
             ws_url.push_str(&format!("?token={secret}"));
         }

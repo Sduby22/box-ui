@@ -74,7 +74,9 @@ mod imp {
         let output = std::process::Command::new("pkexec")
             .arg("sh")
             .arg("-c")
-            .arg(format!("chown root:root '{path_str}' && chmod u+s '{path_str}'"))
+            .arg(format!(
+                "chown root:root '{path_str}' && chmod u+s '{path_str}'"
+            ))
             .output()
             .map_err(|e| format!("Failed to run pkexec: {e}"))?;
 
@@ -119,6 +121,7 @@ mod imp {
 
 #[cfg(target_os = "windows")]
 mod imp {
+    use std::os::windows::ffi::OsStrExt;
     use std::path::Path;
 
     pub fn has_kernel_permissions(_path: &Path) -> bool {
@@ -141,7 +144,9 @@ mod imp {
 
     pub fn is_elevated() -> bool {
         use windows::Win32::Foundation::CloseHandle;
-        use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
+        use windows::Win32::Security::{
+            GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
+        };
         use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
         unsafe {
@@ -169,35 +174,114 @@ mod imp {
         let exe = std::env::current_exe()
             .map_err(|e| format!("Cannot determine executable path: {e}"))?;
 
-        let exe_str = exe.to_string_lossy().replace('\'', "''");
-        let args: Vec<String> = std::env::args()
-            .skip(1)
-            .map(|a| a.replace('\'', "''"))
-            .collect();
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::SW_NORMAL;
+        use windows::core::PCWSTR;
 
-        let command = if args.is_empty() {
-            format!(
-                "Start-Process -FilePath '{exe_str}' -Verb RunAs"
-            )
+        let operation = wide_str("runas");
+        let file = wide_os(exe.as_os_str());
+        let params = command_line_args(std::env::args_os().skip(1));
+        let params_wide = if params.is_empty() {
+            None
         } else {
-            let args_str = args.join("', '");
-            format!(
-                "Start-Process -FilePath '{exe_str}' -ArgumentList '{args_str}' -Verb RunAs"
+            Some(wide_str(&params))
+        };
+        let params_pcwstr = params_wide
+            .as_ref()
+            .map(|p| PCWSTR::from_raw(p.as_ptr()))
+            .unwrap_or_else(PCWSTR::null);
+
+        let result = unsafe {
+            ShellExecuteW(
+                None,
+                PCWSTR::from_raw(operation.as_ptr()),
+                PCWSTR::from_raw(file.as_ptr()),
+                params_pcwstr,
+                PCWSTR::null(),
+                SW_NORMAL,
             )
         };
 
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x01000000;
+        let code = result.0 as usize;
+        if code > 32 {
+            std::process::exit(0);
+        }
 
-        let result = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command", &command])
-            .creation_flags(CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB)
-            .spawn();
+        Err(format!(
+            "Failed to relaunch as administrator: {}",
+            shell_execute_error(code)
+        ))
+    }
 
-        match result {
-            Ok(_) => std::process::exit(0),
-            Err(e) => Err(format!("Failed to relaunch as administrator: {e}")),
+    fn wide_os(value: &std::ffi::OsStr) -> Vec<u16> {
+        value.encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    fn wide_str(value: &str) -> Vec<u16> {
+        std::ffi::OsStr::new(value)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    fn command_line_args(args: impl Iterator<Item = std::ffi::OsString>) -> String {
+        args.map(|arg| quote_windows_arg(&arg.to_string_lossy()))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn quote_windows_arg(arg: &str) -> String {
+        if arg.is_empty() {
+            return "\"\"".to_string();
+        }
+
+        if !arg.chars().any(|c| matches!(c, ' ' | '\t' | '"')) {
+            return arg.to_string();
+        }
+
+        let mut quoted = String::with_capacity(arg.len() + 2);
+        quoted.push('"');
+
+        let mut backslashes = 0usize;
+        for ch in arg.chars() {
+            match ch {
+                '\\' => {
+                    backslashes += 1;
+                }
+                '"' => {
+                    quoted.extend(std::iter::repeat_n('\\', backslashes * 2 + 1));
+                    quoted.push('"');
+                    backslashes = 0;
+                }
+                _ => {
+                    quoted.extend(std::iter::repeat_n('\\', backslashes));
+                    backslashes = 0;
+                    quoted.push(ch);
+                }
+            }
+        }
+
+        quoted.extend(std::iter::repeat_n('\\', backslashes * 2));
+        quoted.push('"');
+        quoted
+    }
+
+    fn shell_execute_error(code: usize) -> &'static str {
+        match code {
+            0 => "out of memory or resources",
+            2 => "file not found",
+            3 => "path not found",
+            5 => "access denied",
+            8 => "out of memory",
+            26 => "sharing violation",
+            27 => "file association incomplete",
+            28 => "DDE timeout",
+            29 => "DDE transaction failed",
+            30 => "DDE busy",
+            31 => "no application association",
+            32 => "DLL not found",
+            1223 => "UAC prompt was cancelled",
+            _ => "ShellExecuteW failed",
         }
     }
 }

@@ -123,7 +123,10 @@ pub fn show_config_manager(ui: &mut egui::Ui, app: &mut BoxApp) {
                 action = Some(ConfigAction::SetActive(config.id));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add_enabled(!is_active, egui::Button::new("🗑").small()).clicked() {
+                if ui
+                    .add_enabled(!is_active, egui::Button::new("🗑").small())
+                    .clicked()
+                {
                     action = Some(ConfigAction::Remove(config.id));
                 }
                 if ui.small_button("✏").clicked() {
@@ -212,7 +215,12 @@ pub fn show_config_manager(ui: &mut egui::Ui, app: &mut BoxApp) {
 
 /// Persist remote configs that were successfully downloaded, and handle edit completions.
 pub fn process_pending_configs(app: &mut BoxApp) {
-    let mut pending_configs = app.dashboard_state.config.pending_remote_config.lock().unwrap();
+    let mut pending_configs = app
+        .dashboard_state
+        .config
+        .pending_remote_config
+        .lock()
+        .unwrap();
     if !pending_configs.is_empty() {
         for pending in pending_configs.drain(..) {
             app.settings_manager.add_remote_config(
@@ -320,8 +328,12 @@ pub fn show_add_config_window(ctx: &egui::Context, app: &mut BoxApp) {
                     ui.add_space(8.0);
 
                     if ui.button("Add").clicked() {
-                        let name =
-                            app.dashboard_state.config.add_config_name_input.trim().to_string();
+                        let name = app
+                            .dashboard_state
+                            .config
+                            .add_config_name_input
+                            .trim()
+                            .to_string();
                         let path_str = app.dashboard_state.config.add_config_path_input.trim();
                         if name.is_empty() {
                             push_toast(
@@ -386,10 +398,18 @@ pub fn show_add_config_window(ctx: &egui::Context, app: &mut BoxApp) {
                         .add_enabled(!is_downloading, egui::Button::new("Add"))
                         .clicked()
                     {
-                        let name =
-                            app.dashboard_state.config.add_config_name_input.trim().to_string();
-                        let url =
-                            app.dashboard_state.config.add_config_url_input.trim().to_string();
+                        let name = app
+                            .dashboard_state
+                            .config
+                            .add_config_name_input
+                            .trim()
+                            .to_string();
+                        let url = app
+                            .dashboard_state
+                            .config
+                            .add_config_url_input
+                            .trim()
+                            .to_string();
                         let interval_str =
                             app.dashboard_state.config.add_config_interval_input.trim();
 
@@ -410,8 +430,7 @@ pub fn show_add_config_window(ctx: &egui::Context, app: &mut BoxApp) {
 
                             let client = app.http_client.clone();
                             let toasts = app.toasts.clone();
-                            let pending =
-                                app.dashboard_state.config.pending_remote_config.clone();
+                            let pending = app.dashboard_state.config.pending_remote_config.clone();
                             let downloading_flag =
                                 app.dashboard_state.config.remote_config_downloading.clone();
                             let config_name = name.clone();
@@ -432,18 +451,14 @@ pub fn show_add_config_window(ctx: &egui::Context, app: &mut BoxApp) {
                                         push_toast(
                                             &toasts,
                                             ToastKind::Success,
-                                            format!(
-                                                "Remote config \"{config_name}\" downloaded"
-                                            ),
+                                            format!("Remote config \"{config_name}\" downloaded"),
                                         );
                                     }
                                     Err(e) => {
                                         push_toast(
                                             &toasts,
                                             ToastKind::Error,
-                                            format!(
-                                                "Failed to fetch \"{config_name}\": {e}"
-                                            ),
+                                            format!("Failed to fetch \"{config_name}\": {e}"),
                                         );
                                     }
                                 }
@@ -495,9 +510,7 @@ pub fn show_edit_config_window(ctx: &egui::Context, app: &mut BoxApp) {
             if is_remote {
                 ui.horizontal(|ui| {
                     ui.label("URL:");
-                    ui.text_edit_singleline(
-                        &mut app.dashboard_state.config.edit_config_url_input,
-                    );
+                    ui.text_edit_singleline(&mut app.dashboard_state.config.edit_config_url_input);
                 });
 
                 ui.horizontal(|ui| {
@@ -535,8 +548,12 @@ pub fn show_edit_config_window(ctx: &egui::Context, app: &mut BoxApp) {
                     );
                 } else if let Some(id) = app.dashboard_state.config.edit_config_id {
                     if is_remote {
-                        let url =
-                            app.dashboard_state.config.edit_config_url_input.trim().to_string();
+                        let url = app
+                            .dashboard_state
+                            .config
+                            .edit_config_url_input
+                            .trim()
+                            .to_string();
                         let interval_str =
                             app.dashboard_state.config.edit_config_interval_input.trim();
                         let interval = match interval_str.parse::<u32>() {
@@ -570,8 +587,11 @@ pub fn show_edit_config_window(ctx: &egui::Context, app: &mut BoxApp) {
                         let toasts = app.toasts.clone();
                         let downloading_flag =
                             app.dashboard_state.config.remote_config_downloading.clone();
-                        let pending_edit =
-                            app.dashboard_state.config.pending_remote_config_edit.clone();
+                        let pending_edit = app
+                            .dashboard_state
+                            .config
+                            .pending_remote_config_edit
+                            .clone();
                         let config_url = url.clone();
                         let config_name = name.clone();
 
@@ -618,8 +638,11 @@ pub fn show_edit_config_window(ctx: &egui::Context, app: &mut BoxApp) {
                                 format!("Config file not found: {}", path.display()),
                             );
                         } else {
-                            app.settings_manager
-                                .update_config(id, name.clone(), ConfigSource::Local);
+                            app.settings_manager.update_config(
+                                id,
+                                name.clone(),
+                                ConfigSource::Local,
+                            );
                             push_toast(
                                 &app.toasts,
                                 ToastKind::Success,

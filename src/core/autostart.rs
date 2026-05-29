@@ -43,8 +43,7 @@ mod imp {
     }
 
     pub fn is_registered() -> bool {
-        let path = dirs::config_dir()
-            .map(|d| d.join("autostart").join("box-ui.desktop"));
+        let path = dirs::config_dir().map(|d| d.join("autostart").join("box-ui.desktop"));
         let Some(path) = path else { return false };
         let Ok(content) = std::fs::read_to_string(&path) else {
             return false;
@@ -80,8 +79,8 @@ mod imp {
     /// Derive the `.app` bundle path from the running binary.
     /// e.g. `/Applications/Box UI.app/Contents/MacOS/box-ui` → `/Applications/Box UI.app`
     fn app_bundle_path() -> Result<PathBuf, String> {
-        let exe = std::env::current_exe()
-            .map_err(|e| format!("Failed to get current exe path: {e}"))?;
+        let exe =
+            std::env::current_exe().map_err(|e| format!("Failed to get current exe path: {e}"))?;
         // Walk up looking for a directory ending in `.app`
         let mut path = exe.as_path();
         while let Some(parent) = path.parent() {
@@ -139,9 +138,8 @@ mod imp {
     pub fn unregister() -> Result<(), String> {
         remove_legacy_plist();
 
-        let script = format!(
-            r#"tell application "System Events" to delete login item "{APP_NAME}""#
-        );
+        let script =
+            format!(r#"tell application "System Events" to delete login item "{APP_NAME}""#);
         let output = std::process::Command::new("osascript")
             .args(["-e", &script])
             .output()
@@ -158,9 +156,8 @@ mod imp {
     }
 
     pub fn is_registered() -> bool {
-        let script = format!(
-            r#"tell application "System Events" to get the name of every login item"#
-        );
+        let script =
+            format!(r#"tell application "System Events" to get the name of every login item"#);
         std::process::Command::new("osascript")
             .args(["-e", &script])
             .output()
@@ -248,8 +245,7 @@ mod imp {
 
     /// Check if the registered path matches the current exe (case-insensitive on Windows).
     fn path_matches_current(registered: &str) -> bool {
-        super::current_exe_str()
-            .is_ok_and(|current| current.eq_ignore_ascii_case(registered))
+        super::current_exe_str().is_ok_and(|current| current.eq_ignore_ascii_case(registered))
     }
 
     pub fn register() -> Result<(), String> {
@@ -295,8 +291,7 @@ mod imp {
             for code_unit in xml.encode_utf16() {
                 bytes.extend_from_slice(&code_unit.to_le_bytes());
             }
-            std::fs::write(&temp, &bytes)
-                .map_err(|e| format!("Failed to write task XML: {e}"))?;
+            std::fs::write(&temp, &bytes).map_err(|e| format!("Failed to write task XML: {e}"))?;
 
             let output = {
                 use std::os::windows::process::CommandExt;
@@ -312,7 +307,7 @@ mod imp {
                     .creation_flags(0x08000000) // CREATE_NO_WINDOW
                     .output()
             }
-                .map_err(|e| format!("Failed to run schtasks: {e}"))?;
+            .map_err(|e| format!("Failed to run schtasks: {e}"))?;
 
             std::fs::remove_file(&temp).ok();
 
@@ -320,7 +315,10 @@ mod imp {
                 Ok(())
             } else {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                Err(format!("Failed to create scheduled task: {}", stderr.trim()))
+                Err(format!(
+                    "Failed to create scheduled task: {}",
+                    stderr.trim()
+                ))
             }
         } else {
             // Not elevated — fall back to Startup folder .bat

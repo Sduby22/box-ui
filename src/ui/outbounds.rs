@@ -85,7 +85,9 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
 
     egui::ScrollArea::vertical().show(ui, |ui| {
         // Two-pass render: non-GLOBAL groups first, then GLOBAL — avoids sorted_indices Vec
-        for group in groups.iter().filter(|g| g.name != "GLOBAL")
+        for group in groups
+            .iter()
+            .filter(|g| g.name != "GLOBAL")
             .chain(groups.iter().filter(|g| g.name == "GLOBAL"))
         {
             let nodes = match &group.all {
@@ -108,7 +110,10 @@ pub fn show(ui: &mut egui::Ui, app: &mut BoxApp) {
                 // Make the entire header row clickable (including text)
                 let header_rect = header.response.rect;
                 let header_id = ui.id().with(&group.name).with("header");
-                if ui.interact(header_rect, header_id, egui::Sense::click()).clicked() {
+                if ui
+                    .interact(header_rect, header_id, egui::Sense::click())
+                    .clicked()
+                {
                     if is_collapsed {
                         app.outbounds_state.expanded.insert(group.name.clone());
                     } else {
@@ -187,11 +192,7 @@ fn switch_proxy(app: &mut BoxApp, group: &str, node: &str) {
     let client = app.http_client.clone();
 
     app.runtime.spawn(async move {
-        let url = format!(
-            "{}/proxies/{}",
-            base_url,
-            urlencoding::encode(&group)
-        );
+        let url = format!("{}/proxies/{}", base_url, urlencoding::encode(&group));
         let body = serde_json::json!({ "name": node });
 
         let mut req = client.put(&url).json(&body);

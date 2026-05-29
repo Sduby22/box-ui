@@ -129,10 +129,7 @@ pub fn extract_kernel(
     Ok(dest)
 }
 
-fn extract_tar_gz(
-    archive_path: &std::path::Path,
-    dest: &std::path::Path,
-) -> Result<(), String> {
+fn extract_tar_gz(archive_path: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
     let file =
         std::fs::File::open(archive_path).map_err(|e| format!("Failed to open archive: {e}"))?;
     let decoder = flate2::read::GzDecoder::new(file);
@@ -144,7 +141,10 @@ fn extract_tar_gz(
         "sing-box"
     };
 
-    for entry in archive.entries().map_err(|e| format!("Failed to read archive: {e}"))? {
+    for entry in archive
+        .entries()
+        .map_err(|e| format!("Failed to read archive: {e}"))?
+    {
         let mut entry = entry.map_err(|e| format!("Failed to read entry: {e}"))?;
         let path = entry
             .path()
@@ -165,14 +165,10 @@ fn extract_tar_gz(
     Err(format!("Could not find {target_name} in archive"))
 }
 
-fn extract_zip(
-    archive_path: &std::path::Path,
-    dest: &std::path::Path,
-) -> Result<(), String> {
+fn extract_zip(archive_path: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
     let file =
         std::fs::File::open(archive_path).map_err(|e| format!("Failed to open archive: {e}"))?;
-    let mut archive =
-        zip::ZipArchive::new(file).map_err(|e| format!("Failed to read zip: {e}"))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("Failed to read zip: {e}"))?;
 
     let target_name = if cfg!(target_os = "windows") {
         "sing-box.exe"
@@ -191,8 +187,7 @@ fn extract_zip(
         {
             let mut out =
                 std::fs::File::create(dest).map_err(|e| format!("Failed to create file: {e}"))?;
-            std::io::copy(&mut entry, &mut out)
-                .map_err(|e| format!("Failed to extract: {e}"))?;
+            std::io::copy(&mut entry, &mut out).map_err(|e| format!("Failed to extract: {e}"))?;
             return Ok(());
         }
     }
@@ -213,10 +208,7 @@ pub async fn fetch_remote_config(
         .map_err(|e| format!("Failed to fetch config: {e}"))?;
 
     if !resp.status().is_success() {
-        return Err(format!(
-            "Failed to fetch config: HTTP {}",
-            resp.status()
-        ));
+        return Err(format!("Failed to fetch config: HTTP {}", resp.status()));
     }
 
     let bytes = resp

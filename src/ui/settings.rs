@@ -1,6 +1,6 @@
 use eframe::egui;
 
-use crate::app::{push_toast, BoxApp, ToastKind};
+use crate::app::{BoxApp, ToastKind, push_toast};
 use crate::core::autostart;
 
 pub struct SettingsState {

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigEntry {
@@ -9,11 +9,13 @@ pub struct ConfigEntry {
     pub id: Uuid,
     pub name: String,
     pub path: PathBuf,
+    #[serde(default)]
     pub source: ConfigSource,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub enum ConfigSource {
+    #[default]
     Local,
     Remote {
         url: String,
@@ -23,10 +25,13 @@ pub enum ConfigSource {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AppSettings {
+    #[serde(default)]
     pub configs: Vec<ConfigEntry>,
     /// UUID of the active configuration.
+    #[serde(default)]
     pub active_config: Option<Uuid>,
     /// Filename of the active kernel binary in the kernels directory.
+    #[serde(default)]
     pub active_kernel: Option<String>,
     /// Maximum number of log lines to keep in the buffer.
     #[serde(default = "default_max_log_lines")]
@@ -79,23 +84,7 @@ impl SettingsManager {
         std::fs::create_dir_all(&working_dir).ok();
 
         let mut settings = Self::load(&data_dir);
-
-        // Ensure every config has a valid (non-nil) UUID
-        let mut migrated = false;
-        for entry in &mut settings.configs {
-            if entry.id.is_nil() {
-                entry.id = Uuid::new_v4();
-                migrated = true;
-            }
-        }
-
-        // Auto-select first config if none is active
-        if settings.active_config.is_none()
-            && let Some(first) = settings.configs.first()
-        {
-            settings.active_config = Some(first.id);
-            migrated = true;
-        }
+        let migrated = Self::normalize_settings(&mut settings);
 
         let mgr = Self {
             data_dir,
@@ -117,19 +106,76 @@ impl SettingsManager {
 
     fn load(data_dir: &Path) -> AppSettings {
         let path = Self::settings_path(data_dir);
-        if path.exists() {
-            let content = std::fs::read_to_string(&path).unwrap_or_default();
-            serde_json::from_str(&content).unwrap_or_default()
-        } else {
-            AppSettings::default()
+        let content = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!("Failed to read settings file {}: {e}", path.display());
+                }
+                return AppSettings::default();
+            }
+        };
+
+        match serde_json::from_str(&content) {
+            Ok(settings) => settings,
+            Err(e) => {
+                backup_invalid_settings(&path, &content, &e.to_string());
+                AppSettings::default()
+            }
         }
     }
 
     fn save(&self) {
-        let path = Self::settings_path(&self.data_dir);
-        if let Ok(content) = serde_json::to_string_pretty(&self.settings) {
-            std::fs::write(path, content).ok();
+        if let Err(e) = self.save_inner() {
+            tracing::warn!("Failed to save settings: {e}");
         }
+    }
+
+    fn save_inner(&self) -> Result<(), String> {
+        let path = Self::settings_path(&self.data_dir);
+        std::fs::create_dir_all(&self.data_dir)
+            .map_err(|e| format!("Failed to create data directory: {e}"))?;
+
+        let tmp_path = path.with_extension("json.tmp");
+        let content = serde_json::to_vec_pretty(&self.settings)
+            .map_err(|e| format!("Failed to serialize settings: {e}"))?;
+
+        {
+            let mut file = std::fs::File::create(&tmp_path)
+                .map_err(|e| format!("Failed to create temp settings file: {e}"))?;
+            file.write_all(&content)
+                .map_err(|e| format!("Failed to write temp settings file: {e}"))?;
+            file.sync_all()
+                .map_err(|e| format!("Failed to flush temp settings file: {e}"))?;
+        }
+
+        replace_file(&tmp_path, &path).map_err(|e| format!("Failed to replace settings file: {e}"))
+    }
+
+    fn normalize_settings(settings: &mut AppSettings) -> bool {
+        let mut migrated = false;
+
+        for entry in &mut settings.configs {
+            if entry.id.is_nil() {
+                entry.id = Uuid::new_v4();
+                migrated = true;
+            }
+        }
+
+        let active_is_valid = settings
+            .active_config
+            .is_some_and(|id| settings.configs.iter().any(|c| c.id == id));
+        let normalized_active = if active_is_valid {
+            settings.active_config
+        } else {
+            settings.configs.first().map(|c| c.id)
+        };
+        if settings.active_config != normalized_active {
+            settings.active_config = normalized_active;
+            migrated = true;
+        }
+
+        migrated
     }
 
     // ── Config operations ──
@@ -185,8 +231,12 @@ impl SettingsManager {
 
     pub fn remove_config(&mut self, id: Uuid) {
         if let Some(pos) = self.settings.configs.iter().position(|c| c.id == id) {
+            let was_active = self.settings.active_config == Some(id);
             let entry = self.settings.configs.remove(pos);
             std::fs::remove_file(&entry.path).ok();
+            if was_active {
+                self.settings.active_config = self.settings.configs.first().map(|c| c.id);
+            }
             self.save();
         }
     }
@@ -367,4 +417,52 @@ impl SettingsManager {
         self.settings.release_memory_on_hide = enabled;
         self.save();
     }
+}
+
+fn backup_invalid_settings(path: &Path, content: &str, reason: &str) {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let backup = path.with_file_name(format!("settings.invalid.{timestamp}.json"));
+
+    match std::fs::write(&backup, content) {
+        Ok(()) => tracing::warn!(
+            "Settings file {} could not be parsed ({reason}); backed it up to {}",
+            path.display(),
+            backup.display()
+        ),
+        Err(e) => tracing::warn!(
+            "Settings file {} could not be parsed ({reason}); backup failed: {e}",
+            path.display()
+        ),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn replace_file(tmp_path: &Path, path: &Path) -> std::io::Result<()> {
+    let backup_path = path.with_extension("json.bak");
+
+    if path.exists() {
+        std::fs::copy(path, &backup_path)?;
+        std::fs::remove_file(path)?;
+    }
+
+    match std::fs::rename(tmp_path, path) {
+        Ok(()) => {
+            std::fs::remove_file(&backup_path).ok();
+            Ok(())
+        }
+        Err(e) => {
+            if backup_path.exists() {
+                let _ = std::fs::rename(&backup_path, path);
+            }
+            Err(e)
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn replace_file(tmp_path: &Path, path: &Path) -> std::io::Result<()> {
+    std::fs::rename(tmp_path, path)
 }

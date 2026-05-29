@@ -69,7 +69,7 @@ pub fn show_kernel_manager(ui: &mut egui::Ui, app: &mut BoxApp) {
         }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        if ui.small_button("+ Download").clicked() {
+            if ui.small_button("+ Download").clicked() {
                 app.dashboard_state.kernel.show_releases_window = true;
                 fetch_releases(app);
             }
@@ -95,11 +95,7 @@ pub fn show_kernel_manager(ui: &mut egui::Ui, app: &mut BoxApp) {
                             app.refresh_clash_api_base();
                         }
                         Err(e) => {
-                            push_toast(
-                                &app.toasts,
-                                ToastKind::Error,
-                                format!("Start failed: {e}"),
-                            );
+                            push_toast(&app.toasts, ToastKind::Error, format!("Start failed: {e}"));
                         }
                     }
                 } else {
@@ -120,11 +116,7 @@ pub fn show_kernel_manager(ui: &mut egui::Ui, app: &mut BoxApp) {
                     );
                 }
                 Err(e) => {
-                    push_toast(
-                        &app.toasts,
-                        ToastKind::Error,
-                        format!("Stop failed: {e}"),
-                    );
+                    push_toast(&app.toasts, ToastKind::Error, format!("Stop failed: {e}"));
                 }
             }
         }
@@ -264,7 +256,13 @@ pub fn show_releases_window(ctx: &egui::Context, app: &mut BoxApp) {
             };
 
             if release_items.is_empty() {
-                let has_releases = !app.dashboard_state.kernel.releases.lock().unwrap().is_empty();
+                let has_releases = !app
+                    .dashboard_state
+                    .kernel
+                    .releases
+                    .lock()
+                    .unwrap()
+                    .is_empty();
                 if has_releases {
                     ui.label("No matching releases for this platform.");
                 } else {
