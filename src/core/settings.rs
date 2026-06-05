@@ -396,6 +396,10 @@ impl SettingsManager {
         &self.working_dir
     }
 
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
     // ── Launch core on start ──
 
     pub fn launch_core_on_start(&self) -> bool {

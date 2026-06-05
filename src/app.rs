@@ -82,6 +82,7 @@ impl BoxApp {
         let settings_manager = SettingsManager::new(data_dir);
 
         crate::fonts::setup_fonts(&cc.egui_ctx);
+        install_wgpu_error_handlers(cc, settings_manager.data_dir());
 
         let kernel_path = settings_manager.active_kernel_path();
         let (clash_api_base, clash_api_secret) = {
@@ -292,6 +293,30 @@ impl BoxApp {
             }
         }
     }
+}
+
+fn install_wgpu_error_handlers(cc: &eframe::CreationContext<'_>, data_dir: &std::path::Path) {
+    let Some(render_state) = cc.wgpu_render_state.as_ref() else {
+        return;
+    };
+
+    let diagnostics_dir = data_dir.to_path_buf();
+    render_state
+        .device
+        .on_uncaptured_error(Arc::new(move |err| {
+            let message = format!("wgpu uncaptured error: {err:?}");
+            tracing::warn!("{message}");
+            crate::core::diagnostics::append_line(&diagnostics_dir, &message);
+        }));
+
+    let diagnostics_dir = data_dir.to_path_buf();
+    render_state
+        .device
+        .set_device_lost_callback(move |reason, message| {
+            let message = format!("wgpu device lost: {reason:?}; {message}");
+            tracing::warn!("{message}");
+            crate::core::diagnostics::append_line(&diagnostics_dir, &message);
+        });
 }
 
 impl eframe::App for BoxApp {

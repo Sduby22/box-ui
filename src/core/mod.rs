@@ -1,4 +1,5 @@
 pub mod autostart;
+pub mod diagnostics;
 pub mod download;
 pub mod kernel;
 pub mod permissions;

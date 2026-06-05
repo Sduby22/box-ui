@@ -27,6 +27,12 @@ fn main() -> eframe::Result<()> {
 
     core::platform::setup_child_process_cleanup();
 
+    let data_dir = dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("box-ui");
+    std::fs::create_dir_all(&data_dir).ok();
+    core::diagnostics::install_panic_hook(data_dir.clone());
+
     // Single-threaded runtime: this GUI app only needs one async worker thread
     // instead of the default N (one per CPU core), saving ~2MB stack per thread.
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -40,11 +46,6 @@ fn main() -> eframe::Result<()> {
         .spawn(move || rt.block_on(std::future::pending::<()>()))
         .expect("failed to spawn tokio runtime thread");
     let _guard = handle.enter();
-
-    let data_dir = dirs::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("box-ui");
-    std::fs::create_dir_all(&data_dir).ok();
 
     // Kernel child process handle persists across window destroy/recreate cycles.
     let kernel_backend: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));

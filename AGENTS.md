@@ -114,6 +114,7 @@ box-ui/                        # Cargo workspace root
 │       ├── kernel.rs          # sing-box process management (direct + elevated via setuid/UAC)
 │       ├── download.rs        # GitHub release fetching, archive extraction, remote config
 │       ├── autostart.rs       # Autostart registration (per-platform, Task Scheduler on Windows)
+│       ├── diagnostics.rs     # Panic/GPU diagnostics log for GUI-subsystem builds
 │       ├── permissions.rs     # Kernel privilege management (setuid on Unix, elevation on Windows)
 │       ├── platform.rs        # Platform utilities (Job Object child cleanup on Windows)
 │       └── settings.rs        # AppSettings persistence & SettingsManager
