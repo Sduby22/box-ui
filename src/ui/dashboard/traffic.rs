@@ -1,5 +1,5 @@
 use eframe::egui;
-use egui_plot::{Line, Plot, PlotPoints};
+use egui_plot::{HoverPosition, Line, Plot, PlotPoints};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -77,18 +77,22 @@ pub fn show_traffic_chart(ui: &mut egui::Ui, app: &mut BoxApp) {
             .include_x(0.0)
             .include_x(MAX_TRAFFIC_POINTS as f64)
             .y_axis_formatter(|mark, _range| format_speed_axis(mark.value))
-            .label_formatter(move |_name, value| {
-                let idx = value.x.round() as usize;
+            .label_formatter(move |hover| {
+                // egui_plot 0.36 delivers the hover position as a `HoverPosition`
+                // enum; both variants carry the cursor's plot point, whose x maps
+                // to a history index (points are plotted at x = index).
+                let position = match hover {
+                    HoverPosition::NearDataPoint { position, .. }
+                    | HoverPosition::Elsewhere { position } => position,
+                };
+                let idx = position.x.round() as usize;
                 let h = history_ref.lock().unwrap();
-                if let Some(p) = h.get(idx) {
-                    format!(
-                        "↑ {}\n↓ {}",
-                        crate::core::format_speed(p.upload),
-                        crate::core::format_speed(p.download),
-                    )
-                } else {
-                    String::new()
-                }
+                let p = h.get(idx)?;
+                Some(format!(
+                    "↑ {}\n↓ {}",
+                    crate::core::format_speed(p.upload),
+                    crate::core::format_speed(p.download),
+                ))
             })
             .legend(egui_plot::Legend::default())
             .show(ui, |plot_ui| {

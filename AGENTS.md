@@ -77,6 +77,7 @@ Left sidebar navigation + content area. Sidebar bottom always shows core status 
 - Linux (X11 / Wayland)
 - macOS
 - Windows
+- Hardware GPU rendering by default; a GPU device-loss crash arms a one-launch fallback to a stable software adapter (WARP) via a crash marker file; override with `BOX_UI_GRAPHICS=hardware` or `BOX_UI_GRAPHICS=stable`
 
 ## Tech Stack
 

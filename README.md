@@ -44,6 +44,10 @@ cargo run              # Debug build
 cargo build --release  # Release build
 ```
 
+## Graphics Mode
+
+Box UI renders on the default hardware GPU. If a session dies because the GPU device was lost (e.g. during a graphics driver update), the next launch automatically runs once on a stable software adapter (WARP) and then returns to hardware rendering. Set `BOX_UI_GRAPHICS=hardware` or `BOX_UI_GRAPHICS=stable` to force a mode.
+
 ## License
 
 [MIT](LICENSE)
