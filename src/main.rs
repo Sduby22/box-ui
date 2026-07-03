@@ -20,6 +20,48 @@ pub struct TrayState {
     pub egui_ctx: Mutex<Option<egui::Context>>,
     /// Set by tray Quit so the close handler allows a real app shutdown.
     pub quit_requested: AtomicBool,
+    /// Set by tray Show so the app clears its hidden state and resumes repaints.
+    pub show_requested: AtomicBool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GraphicsMode {
+    Hardware,
+    Stable,
+}
+
+impl GraphicsMode {
+    fn from_env() -> Option<Self> {
+        match std::env::var("BOX_UI_GRAPHICS")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("hardware" | "gpu" | "wgpu") => Some(Self::Hardware),
+            Some("stable" | "software" | "cpu" | "warp") => Some(Self::Stable),
+            _ => None,
+        }
+    }
+
+    /// Hardware rendering by default. A GPU device loss (driver update/reset)
+    /// in a previous hardware session leaves a crash marker; consume it and
+    /// run this launch on the stable software adapter instead so the app is
+    /// usable while the driver settles. An explicit env override wins.
+    fn resolve(data_dir: &std::path::Path) -> Self {
+        if let Some(mode) = Self::from_env() {
+            return mode;
+        }
+        if core::diagnostics::take_gpu_crash_marker(data_dir) {
+            core::diagnostics::append_line(
+                data_dir,
+                "previous hardware session lost the GPU device; using stable graphics for this launch",
+            );
+            return Self::Stable;
+        }
+        Self::Hardware
+    }
 }
 
 fn main() -> eframe::Result<()> {
@@ -80,21 +122,48 @@ fn main() -> eframe::Result<()> {
     let tray_state = Arc::new(TrayState {
         egui_ctx: Mutex::new(None),
         quit_requested: AtomicBool::new(false),
+        show_requested: AtomicBool::new(false),
     });
     let _tray_icon = setup_tray(tray_state.clone(), kernel_backend.clone());
     let tray_enabled = _tray_icon.is_some();
 
+    let graphics_mode = GraphicsMode::resolve(&data_dir);
+    let mut result = run_box_ui(
+        graphics_mode,
+        kernel_backend.clone(),
+        tray_state.clone(),
+        tray_enabled,
+    );
+    if result.is_err() && graphics_mode == GraphicsMode::Hardware {
+        core::diagnostics::append_line(
+            &data_dir,
+            "hardware graphics startup failed; retrying with stable graphics mode",
+        );
+        result = run_box_ui(
+            GraphicsMode::Stable,
+            kernel_backend.clone(),
+            tray_state.clone(),
+            tray_enabled,
+        );
+    }
+    result
+}
+
+fn run_box_ui(
+    graphics_mode: GraphicsMode,
+    kernel_backend: Arc<Mutex<Option<Child>>>,
+    tray_state: Arc<TrayState>,
+    tray_enabled: bool,
+) -> eframe::Result<()> {
     // When the tray is available, close events are cancelled by the app and the
     // window is hidden instead. This keeps the platform event loop alive so the
     // tray icon remains responsive.
     let icon = eframe::icon_data::from_png_bytes(APP_ICON_PNG).expect("failed to decode app icon");
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([900.0, 600.0])
-            .with_min_inner_size([700.0, 450.0])
-            .with_icon(std::sync::Arc::new(icon)),
-        ..Default::default()
-    };
+    let options = native_options(icon, graphics_mode);
+    // Lets the panic hook / device-lost callback arm the stable-graphics
+    // fallback for the next launch only when a hardware session crashes.
+    core::diagnostics::set_hardware_graphics_active(graphics_mode == GraphicsMode::Hardware);
+    tracing::info!("Starting UI with {graphics_mode:?} graphics mode");
 
     eframe::run_native(
         "Box UI",
@@ -108,6 +177,74 @@ fn main() -> eframe::Result<()> {
             )))
         }),
     )
+}
+
+fn native_options(icon: egui::IconData, graphics_mode: GraphicsMode) -> eframe::NativeOptions {
+    let mut options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([900.0, 600.0])
+            .with_min_inner_size([700.0, 450.0])
+            .with_icon(std::sync::Arc::new(icon)),
+        ..Default::default()
+    };
+
+    match graphics_mode {
+        GraphicsMode::Hardware => {}
+        GraphicsMode::Stable => configure_stable_wgpu(&mut options),
+    }
+
+    options
+}
+
+fn configure_stable_wgpu(options: &mut eframe::NativeOptions) {
+    options.renderer = eframe::Renderer::Wgpu;
+    if let eframe::egui_wgpu::WgpuSetup::CreateNew(create_new) =
+        &mut options.wgpu_options.wgpu_setup
+    {
+        create_new.native_adapter_selector = Some(Arc::new(move |adapters, surface| {
+            select_stable_adapter(adapters, surface)
+        }));
+    }
+}
+
+fn select_stable_adapter(
+    adapters: &[eframe::wgpu::Adapter],
+    surface: Option<&eframe::wgpu::Surface<'_>>,
+) -> Result<eframe::wgpu::Adapter, String> {
+    let Some(adapter) = adapters
+        .iter()
+        .filter(|adapter| adapter_supports_surface(adapter, surface))
+        .min_by_key(|adapter| stable_adapter_rank(&adapter.get_info()))
+        .cloned()
+    else {
+        return Err("no compatible wgpu adapter found".to_string());
+    };
+
+    let info = adapter.get_info();
+    tracing::info!(
+        "Selected stable wgpu adapter: {}",
+        eframe::egui_wgpu::adapter_info_summary(&info)
+    );
+    Ok(adapter)
+}
+
+fn adapter_supports_surface(
+    adapter: &eframe::wgpu::Adapter,
+    surface: Option<&eframe::wgpu::Surface<'_>>,
+) -> bool {
+    surface
+        .map(|surface| !surface.get_capabilities(adapter).formats.is_empty())
+        .unwrap_or(true)
+}
+
+fn stable_adapter_rank(info: &eframe::wgpu::AdapterInfo) -> u8 {
+    match info.device_type {
+        eframe::wgpu::DeviceType::Cpu => 0,
+        eframe::wgpu::DeviceType::IntegratedGpu => 1,
+        eframe::wgpu::DeviceType::VirtualGpu => 2,
+        eframe::wgpu::DeviceType::Other => 3,
+        eframe::wgpu::DeviceType::DiscreteGpu => 4,
+    }
 }
 
 fn setup_tray(
@@ -179,6 +316,9 @@ fn setup_tray(
                         }
                     };
                     if let Some(ctx) = ctx_opt {
+                        // Order matters: the flag must be set before the wake
+                        // repaint so the frame it triggers observes it.
+                        tray_state.show_requested.store(true, Ordering::Relaxed);
                         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                         ctx.request_repaint();

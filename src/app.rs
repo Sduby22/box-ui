@@ -37,13 +37,22 @@ pub enum ToastKind {
 /// Thread-safe toast queue, shared with async tasks.
 pub type Toasts = Arc<Mutex<VecDeque<Toast>>>;
 
+/// Upper bound on queued toasts. The queue is only pruned while frames render;
+/// when the window is hidden the app runs at 0 FPS, so background tasks must
+/// not be able to grow it without limit.
+const MAX_TOASTS: usize = 16;
+
 pub fn push_toast(toasts: &Toasts, kind: ToastKind, message: String) {
     let toast = Toast {
         message,
         kind,
         expires_at: std::time::Instant::now() + std::time::Duration::from_secs(5),
     };
-    toasts.lock().unwrap().push_back(toast);
+    let mut toasts = toasts.lock().unwrap();
+    if toasts.len() >= MAX_TOASTS {
+        toasts.pop_front();
+    }
+    toasts.push_back(toast);
 }
 
 pub struct BoxApp {
@@ -64,6 +73,11 @@ pub struct BoxApp {
     pub tray_enabled: bool,
     /// Cached per-frame to avoid repeated Mutex lock + syscall
     pub cached_is_running: bool,
+    /// True while the window is hidden to the tray. eframe on Windows cannot
+    /// see `Visible(false)` (ViewportInfo never reflects it), so it keeps
+    /// running the full UI + render pipeline for hidden windows; this flag is
+    /// how the app knows to stop scheduling repaints and skip ui() entirely.
+    pub hidden: bool,
 }
 
 impl BoxApp {
@@ -127,6 +141,7 @@ impl BoxApp {
             tray_state,
             tray_enabled,
             cached_is_running: false,
+            hidden: false,
         }
     }
 
@@ -316,6 +331,15 @@ fn install_wgpu_error_handlers(cc: &eframe::CreationContext<'_>, data_dir: &std:
             let message = format!("wgpu device lost: {reason:?}; {message}");
             tracing::warn!("{message}");
             crate::core::diagnostics::append_line(&diagnostics_dir, &message);
+            // A real device loss (driver update/reset) in a hardware session is
+            // unrecoverable in-process (egui-wgpu panics, release aborts), so
+            // arm the stable-graphics fallback for the next launch. `Destroyed`
+            // is normal shutdown and must not arm it.
+            if matches!(reason, eframe::wgpu::DeviceLostReason::Unknown)
+                && crate::core::diagnostics::hardware_graphics_active()
+            {
+                crate::core::diagnostics::write_gpu_crash_marker(&diagnostics_dir);
+            }
         });
 }
 
@@ -324,18 +348,29 @@ impl eframe::App for BoxApp {
         if self.tray_state.quit_requested.load(Ordering::Relaxed) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
+        // Tray "Show" fired: leave the hidden state before this frame renders.
+        // A focused window is also proof we are visible, whatever set the flag.
+        if self.tray_state.show_requested.swap(false, Ordering::Relaxed)
+            || (self.hidden && ctx.input(|i| i.viewport().focused == Some(true)))
+        {
+            self.hidden = false;
+        }
+
         self.update_app_background_services();
-        ctx.request_repaint_after(std::time::Duration::from_secs(1));
-    }
 
-    fn ui(&mut self, root_ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = root_ui.ctx().clone();
-
-        // Handle window close: cancel and hide when tray restore is available.
+        // Handle window close here rather than in ui(): eframe 0.35 skips ui()
+        // for invisible/minimized/occluded windows, but always runs logic()
+        // whenever a repaint is requested. Tray Quit closes an already-hidden
+        // window, so the close/CancelClose handling must live where it is
+        // guaranteed to run. It runs after update_app_background_services so the
+        // real-quit branch's stop_all_background_tasks is not immediately undone
+        // by the config refresh task being re-ensured this same frame.
+        //
         // On macOS, letting eframe::run_native return terminates the
-        // NSApplication event loop, which makes the tray icon unresponsive.
-        // When release_memory_on_hide is enabled, we additionally clear heavy
-        // application state and egui caches to reduce memory while hidden.
+        // NSApplication event loop, which makes the tray icon unresponsive, so
+        // when a tray is available we cancel the close and hide instead. When
+        // release_memory_on_hide is enabled we also clear heavy application
+        // state and egui caches to reduce memory while hidden.
         if ctx.input(|i| i.viewport().close_requested()) {
             let quit_requested = self
                 .tray_state
@@ -346,11 +381,32 @@ impl eframe::App for BoxApp {
             if self.tray_enabled && !quit_requested {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                self.release_hidden_memory(&ctx);
+                self.hidden = true;
+                self.release_hidden_memory(ctx);
             } else {
                 self.stop_all_background_tasks();
             }
         }
+
+        // While hidden, schedule nothing: every repaint of a hidden window would
+        // still run logic(), and (when visible) the full render pipeline. Tray
+        // Show/Quit wake the loop with their own request_repaint.
+        if !self.hidden {
+            ctx.request_repaint_after(std::time::Duration::from_secs(1));
+        }
+    }
+
+    fn ui(&mut self, root_ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Hidden to tray: build nothing. eframe 0.35 already skips ui() for
+        // invisible windows; this guard also covers the same frame in which
+        // logic() just hid the window (before the Visible(false) command lands)
+        // and stops tab panels from reviving the websocket/HTTP streams that the
+        // close handler in logic() just tore down.
+        if self.hidden {
+            return;
+        }
+
+        let ctx = root_ui.ctx().clone();
 
         // Sync & start traffic polling globally (sidebar needs live speed data)
         self.dashboard_state.traffic.traffic_polling = self
@@ -365,7 +421,7 @@ impl eframe::App for BoxApp {
         egui::Panel::left("sidebar")
             .resizable(false)
             .exact_size(140.0)
-            .show_inside(root_ui, |ui| {
+            .show(root_ui, |ui| {
                 ui.vertical(|ui| {
                     ui.add_space(8.0);
                     ui.heading("Box UI");
@@ -410,7 +466,7 @@ impl eframe::App for BoxApp {
                 });
             });
 
-        egui::CentralPanel::default().show_inside(root_ui, |ui| match self.current_tab {
+        egui::CentralPanel::default().show(root_ui, |ui| match self.current_tab {
             Tab::Dashboard => ui::dashboard::show(ui, self),
             Tab::Outbounds => ui::outbounds::show(ui, self),
             Tab::Connections => ui::connections::show(ui, self),

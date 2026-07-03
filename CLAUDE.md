@@ -71,12 +71,14 @@ Left sidebar navigation + content area. Sidebar bottom always shows core status 
 ### 5. System Tray
 - Tray icon with context menu (Show / Quit)
 - Minimize to tray on window close
+- **Fully idle while hidden**: the app tracks its own hidden state (eframe cannot detect `Visible(false)` on Windows and would otherwise keep rendering hidden windows); when hidden it schedules no repaints and skips all UI building/streams, waking instantly on tray Show/Quit
 - Quit handler: stops kernel before exit
 
 ### 6. Cross-Platform Support
 - Linux (X11 / Wayland)
 - macOS
 - Windows
+- Hardware GPU rendering by default; a GPU device-loss crash (e.g. driver update) arms a one-launch fallback to a stable software adapter (WARP) via a crash marker file; override with `BOX_UI_GRAPHICS=hardware` or `BOX_UI_GRAPHICS=stable`
 
 ## Tech Stack
 
@@ -128,10 +130,12 @@ App data is stored in `~/.local/share/box-ui/` (or platform equivalent via `dirs
 
 ```
 box-ui/
-├── settings.json    # App settings (configs, kernels, preferences)
-├── configs/         # Imported/downloaded sing-box config files
-├── kernels/         # Downloaded sing-box binaries
-└── pwd/             # Working directory for sing-box process
+├── settings.json      # App settings (configs, kernels, preferences)
+├── configs/           # Imported/downloaded sing-box config files
+├── kernels/           # Downloaded sing-box binaries
+├── pwd/               # Working directory for sing-box process
+├── diagnostics.log    # Append-only crash/GPU diagnostics (GUI builds hide stderr)
+└── gpu-crash-marker   # Transient: arms one stable-graphics launch after a GPU device loss
 ```
 
 ## Build & Run

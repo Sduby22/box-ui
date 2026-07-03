@@ -763,17 +763,16 @@ fn start_config_refresh_task(app: &mut BoxApp) {
     let refreshed_ids = app.dashboard_state.config.refreshed_config_ids.clone();
     let client = app.http_client.clone();
     let toasts = app.toasts.clone();
+    // Wakes the UI for one frame after a refresh so the kernel restart runs
+    // even while the window is hidden at 0 FPS.
+    let egui_ctx = app.tray_state.egui_ctx.lock().unwrap().clone();
 
     running_flag.store(true, Ordering::Relaxed);
 
     let handle = app.runtime.spawn(async move {
-        // Initial delay to avoid hammering on startup
-        for _ in 0..60 {
-            if !running_flag.load(Ordering::Relaxed) {
-                return;
-            }
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-        }
+        // Initial delay to avoid hammering on startup. A plain long sleep is
+        // fine: stop_config_refresh_task aborts the task, which cancels it.
+        tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
 
         // Main loop: check configs every 60 seconds
         loop {
@@ -805,6 +804,9 @@ fn start_config_refresh_task(app: &mut BoxApp) {
                     Ok(()) => {
                         tracing::info!("Auto-refreshed config from {url}");
                         refreshed_ids.lock().unwrap().push(id);
+                        if let Some(ctx) = &egui_ctx {
+                            ctx.request_repaint();
+                        }
                     }
                     Err(e) => {
                         tracing::warn!("Auto-refresh failed for {url}: {e}");
@@ -817,13 +819,7 @@ fn start_config_refresh_task(app: &mut BoxApp) {
                 }
             }
 
-            // Sleep 60s in 1-second chunks so the task can exit promptly when flagged
-            for _ in 0..60 {
-                if !running_flag.load(Ordering::Relaxed) {
-                    return;
-                }
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
         }
     });
     app.dashboard_state.config.refresh_task_handle = Some(handle);
